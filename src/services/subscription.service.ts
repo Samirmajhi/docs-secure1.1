@@ -1,4 +1,5 @@
 import axios from 'axios';
+import api from './api'; // Import the configured api client instead
 
 export interface SubscriptionPlan {
   id: number;
@@ -34,27 +35,15 @@ const DEFAULT_STORAGE = {
 };
 
 class SubscriptionService {
+  // Use a hardcoded URL to avoid any issues with baseUrl being undefined
   private baseUrl = 'http://localhost:8000/api';
-
-  private getAuthHeaders() {
-    const token = localStorage.getItem('token');
-    console.log('Auth token for subscription request:', token ? 'Present' : 'Missing');
-    
-    if (!token) {
-      console.warn('No auth token found in localStorage');
-    }
-    
-    return {
-      headers: {
-        Authorization: token ? `Bearer ${token}` : ''
-      }
-    };
-  }
 
   async getPlans(): Promise<SubscriptionPlan[]> {
     try {
       console.log('Fetching subscription plans...');
-      const response = await axios.get(`${this.baseUrl}/subscription/plans`, this.getAuthHeaders());
+      
+      // Use the configured api client instead of direct axios
+      const response = await api.get('/subscription/plans');
       
       if (!response.data || !Array.isArray(response.data)) {
         console.warn('Invalid plans data received:', response.data);
@@ -74,42 +63,81 @@ class SubscriptionService {
     try {
       console.log('Fetching current subscription...');
       
-      // Check if token exists first to avoid unnecessary API calls
-      const token = localStorage.getItem('token');
-      if (!token) {
-        console.warn('No token available for subscription request');
-        return DEFAULT_FREE_PLAN;
+      // First try with a direct fetch to avoid any baseUrl issues
+      try {
+        const timestamp = new Date().getTime(); // Cache-busting parameter
+        // Direct fetch call with hardcoded URL
+        const response = await fetch(`http://localhost:8000/api/subscription/user?t=${timestamp}`, {
+          headers: {
+            'Authorization': `Bearer ${localStorage.getItem('token') || ''}`,
+            'Content-Type': 'application/json'
+          }
+        });
+        
+        if (!response.ok) {
+          throw new Error(`HTTP error: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        
+        // Validate response data
+        if (!data) {
+          console.warn('Empty subscription data received');
+          return DEFAULT_FREE_PLAN;
+        }
+        
+        console.log('Current subscription response (raw):', data);
+        
+        // Ensure numeric values are properly converted
+        const storage_limit = typeof data.storage_limit === 'string' 
+          ? parseInt(data.storage_limit, 10) 
+          : (typeof data.storage_limit === 'number' ? data.storage_limit : DEFAULT_FREE_PLAN.storage_limit);
+        
+        const price = typeof data.price === 'string'
+          ? parseFloat(data.price)
+          : (typeof data.price === 'number' ? data.price : 0);
+        
+        // Ensure all required fields are present, use defaults for any missing fields
+        return {
+          id: typeof data.id === 'string' ? parseInt(data.id, 10) : (data.id ?? 1),
+          name: data.name ?? 'Free',
+          storage_limit: storage_limit,
+          price: price,
+          features: data.features ?? DEFAULT_FREE_PLAN.features
+        };
+      } catch (fetchError) {
+        console.error('Error with direct fetch, trying api client:', fetchError);
+        
+        // If direct fetch fails, try with api client
+        const response = await api.get(`/subscription/user?t=${new Date().getTime()}`);
+        
+        if (!response.data) {
+          console.warn('Empty subscription data received');
+          return DEFAULT_FREE_PLAN;
+        }
+        
+        const data = response.data;
+        console.log('Current subscription response (raw from api client):', data);
+        
+        // Ensure numeric values are properly converted
+        const storage_limit = typeof data.storage_limit === 'string' 
+          ? parseInt(data.storage_limit, 10) 
+          : (typeof data.storage_limit === 'number' ? data.storage_limit : DEFAULT_FREE_PLAN.storage_limit);
+        
+        const price = typeof data.price === 'string'
+          ? parseFloat(data.price)
+          : (typeof data.price === 'number' ? data.price : 0);
+        
+        return {
+          id: typeof data.id === 'string' ? parseInt(data.id, 10) : (data.id ?? 1),
+          name: data.name ?? 'Free',
+          storage_limit: storage_limit,
+          price: price,
+          features: data.features ?? DEFAULT_FREE_PLAN.features
+        };
       }
-      
-      const timestamp = new Date().getTime(); // Cache-busting parameter
-      const response = await axios.get(`${this.baseUrl}/subscription/user?t=${timestamp}`, this.getAuthHeaders());
-      
-      // Validate response data
-      if (!response.data) {
-        console.warn('Empty subscription data received');
-        return DEFAULT_FREE_PLAN;
-      }
-      
-      // Validate required fields
-      const data = response.data;
-      if (typeof data.id === 'undefined' || !data.name || typeof data.storage_limit === 'undefined') {
-        console.warn('Invalid subscription data format:', data);
-        return DEFAULT_FREE_PLAN;
-      }
-      
-      console.log('Current subscription response:', data);
-      
-      // Ensure all required fields are present, use defaults for any missing fields
-      return {
-        id: data.id || 1,
-        name: data.name || 'Free',
-        storage_limit: data.storage_limit || DEFAULT_FREE_PLAN.storage_limit,
-        price: data.price || 0,
-        features: data.features || DEFAULT_FREE_PLAN.features
-      };
     } catch (error) {
       console.error('Error fetching current subscription:', error);
-      // Return a default free plan if API call fails
       return DEFAULT_FREE_PLAN;
     }
   }
@@ -118,33 +146,57 @@ class SubscriptionService {
     try {
       console.log('Fetching storage usage...');
       
-      // Check if token exists first to avoid unnecessary API calls
-      const token = localStorage.getItem('token');
-      if (!token) {
-        console.warn('No token available for storage request');
-        return DEFAULT_STORAGE;
+      // First try with a direct fetch to avoid any baseUrl issues
+      try {
+        const timestamp = new Date().getTime(); // Cache-busting parameter
+        // Direct fetch call with hardcoded URL
+        const response = await fetch(`http://localhost:8000/api/subscription/storage?t=${timestamp}`, {
+          headers: {
+            'Authorization': `Bearer ${localStorage.getItem('token') || ''}`,
+            'Content-Type': 'application/json'
+          }
+        });
+        
+        if (!response.ok) {
+          throw new Error(`HTTP error: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        
+        if (!data) {
+          console.warn('Empty storage data received');
+          return DEFAULT_STORAGE;
+        }
+        
+        console.log('Storage usage response (raw):', data);
+        
+        // Ensure values are numbers, converting from strings if necessary
+        return {
+          used: typeof data.used === 'string' ? parseInt(data.used, 10) : (typeof data.used === 'number' ? data.used : 0),
+          limit: typeof data.limit === 'string' ? parseInt(data.limit, 10) : (typeof data.limit === 'number' ? data.limit : DEFAULT_STORAGE.limit)
+        };
+      } catch (fetchError) {
+        console.error('Error with direct fetch, trying api client:', fetchError);
+        
+        // If direct fetch fails, try with api client
+        const response = await api.get(`/subscription/storage?t=${new Date().getTime()}`);
+        
+        if (!response.data) {
+          console.warn('Empty storage data received');
+          return DEFAULT_STORAGE;
+        }
+        
+        const data = response.data;
+        console.log('Storage usage response (raw from api):', data);
+        
+        // Ensure values are numbers, converting from strings if necessary
+        return {
+          used: typeof data.used === 'string' ? parseInt(data.used, 10) : (typeof data.used === 'number' ? data.used : 0),
+          limit: typeof data.limit === 'string' ? parseInt(data.limit, 10) : (typeof data.limit === 'number' ? data.limit : DEFAULT_STORAGE.limit)
+        };
       }
-      
-      const timestamp = new Date().getTime(); // Cache-busting parameter
-      const response = await axios.get(`${this.baseUrl}/subscription/storage?t=${timestamp}`, this.getAuthHeaders());
-      
-      // Validate response data
-      if (!response.data) {
-        console.warn('Empty storage data received');
-        return DEFAULT_STORAGE;
-      }
-      
-      const data = response.data;
-      console.log('Storage usage response:', data);
-      
-      // Ensure all required fields are present, use defaults for any missing
-      return {
-        used: typeof data.used === 'number' ? data.used : 0,
-        limit: typeof data.limit === 'number' ? data.limit : DEFAULT_STORAGE.limit
-      };
     } catch (error) {
       console.error('Error fetching storage usage:', error);
-      // Return default storage values if API call fails
       return DEFAULT_STORAGE;
     }
   }
@@ -153,12 +205,11 @@ class SubscriptionService {
     try {
       console.log('Updating subscription to plan ID:', planId);
       
-      // Validate planId
       if (!planId || planId <= 0) {
         throw new Error('Invalid plan ID');
       }
       
-      const response = await axios.post(`${this.baseUrl}/subscription/update`, { planId }, this.getAuthHeaders());
+      const response = await api.post('/subscription/update', { planId });
       console.log('Update subscription response:', response.data);
     } catch (error) {
       console.error('Error updating subscription:', error);

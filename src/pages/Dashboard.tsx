@@ -41,7 +41,38 @@ const Dashboard = () => {
   // Fetch subscription data with more generous retry
   const { data: subscription, isError: subError, isLoading: subLoading, refetch: refetchSubscription } = useQuery({
     queryKey: ['subscription'],
-    queryFn: subscriptionService.getCurrentSubscription,
+    queryFn: async () => {
+      try {
+        // Try to get subscription data from service
+        const data = await subscriptionService.getCurrentSubscription();
+        console.log('Subscription query function result (raw):', data);
+        
+        // Ensure we're dealing with numbers for numeric properties
+        const normalizedData = {
+          ...data,
+          id: typeof data.id === 'string' ? parseInt(data.id, 10) : data.id,
+          storage_limit: typeof data.storage_limit === 'string' ? 
+            parseInt(data.storage_limit, 10) : 
+            (typeof data.storage_limit === 'number' ? data.storage_limit : 5 * 1024 * 1024),
+          price: typeof data.price === 'string' ? 
+            parseFloat(data.price) : 
+            (typeof data.price === 'number' ? data.price : 0)
+        };
+        
+        console.log('Subscription query function result (normalized):', normalizedData);
+        return normalizedData;
+      } catch (error) {
+        console.error('Error in subscription query function:', error);
+        // Return default data on error
+        return {
+          id: 1,
+          name: 'Free',
+          storage_limit: 5 * 1024 * 1024, // 5MB in bytes
+          price: 0,
+          features: ['5MB Storage', 'Basic Document Management']
+        };
+      }
+    },
     staleTime: 60000, // 1 minute
     refetchOnWindowFocus: true,
     refetchOnMount: true,
@@ -52,7 +83,29 @@ const Dashboard = () => {
   // Fetch storage usage with more generous retry
   const { data: storageUsage, isError: storageError, isLoading: storageLoading, refetch: refetchStorage } = useQuery({
     queryKey: ['storage'],
-    queryFn: subscriptionService.getStorageUsage,
+    queryFn: async () => {
+      try {
+        // Try to get storage data from service
+        const data = await subscriptionService.getStorageUsage();
+        console.log('Storage query function result (raw):', data);
+        
+        // Ensure we're dealing with numbers
+        const normalizedData = {
+          used: typeof data.used === 'string' ? parseInt(data.used, 10) : (typeof data.used === 'number' ? data.used : 0),
+          limit: typeof data.limit === 'string' ? parseInt(data.limit, 10) : (typeof data.limit === 'number' ? data.limit : 5 * 1024 * 1024)
+        };
+        
+        console.log('Storage query function result (normalized):', normalizedData);
+        return normalizedData;
+      } catch (error) {
+        console.error('Error in storage query function:', error);
+        // Return default data on error
+        return {
+          used: 0,
+          limit: 5 * 1024 * 1024 // 5MB default limit
+        };
+      }
+    },
     staleTime: 60000, // 1 minute
     refetchOnWindowFocus: true,
     refetchOnMount: true,
@@ -84,23 +137,43 @@ const Dashboard = () => {
         
         // Check results
         if (results[0].status === 'fulfilled') {
-          console.log('Fresh subscription data:', results[0].value.data || 'Not available');
+          console.log('Fresh subscription data (raw):', results[0].value.data || 'Not available');
           
           // Force rerender with fresh data if available
           if (results[0].value.data) {
-            const newSubData = {...results[0].value.data};
-            queryClient.setQueryData(['subscription'], newSubData);
+            // Normalize the subscription data
+            const data = results[0].value.data;
+            const normalizedData = {
+              ...data,
+              id: typeof data.id === 'string' ? parseInt(data.id, 10) : data.id,
+              storage_limit: typeof data.storage_limit === 'string' ? 
+                parseInt(data.storage_limit, 10) : 
+                (typeof data.storage_limit === 'number' ? data.storage_limit : 5 * 1024 * 1024),
+              price: typeof data.price === 'string' ? 
+                parseFloat(data.price) : 
+                (typeof data.price === 'number' ? data.price : 0)
+            };
+            
+            console.log('Fresh subscription data (normalized):', normalizedData);
+            queryClient.setQueryData(['subscription'], normalizedData);
           }
         } else {
           console.error('Failed to refresh subscription data:', results[0].reason);
         }
         
         if (results[1].status === 'fulfilled') {
-          console.log('Fresh storage data:', results[1].value.data || 'Not available');
+          console.log('Fresh storage data (raw):', results[1].value.data || 'Not available');
           
           if (results[1].value.data) {
-            const newStorageData = {...results[1].value.data};
-            queryClient.setQueryData(['storage'], newStorageData);
+            // Normalize the storage data
+            const data = results[1].value.data;
+            const normalizedData = {
+              used: typeof data.used === 'string' ? parseInt(data.used, 10) : (typeof data.used === 'number' ? data.used : 0),
+              limit: typeof data.limit === 'string' ? parseInt(data.limit, 10) : (typeof data.limit === 'number' ? data.limit : 5 * 1024 * 1024)
+            };
+            
+            console.log('Fresh storage data (normalized):', normalizedData);
+            queryClient.setQueryData(['storage'], normalizedData);
           }
         } else {
           console.error('Failed to refresh storage data:', results[1].reason);
