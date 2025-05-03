@@ -1,0 +1,29 @@
+# API Settings
+VITE_API_URL=http://localhost:8000/api
+VITE_STORAGE_URL=http://localhost:8000/storage
+
+# Auth Settings
+JWT_SECRET=your-secure-jwt-secret-key
+
+# Database settings
+DB_HOST=ep-square-snowflake-a4gn24ow-pooler.us-east-1.aws.neon.tech
+DB_PORT=5432
+DB_NAME=neondb
+DB_USER=neondb_owner
+DB_PASSWORD=npg_8fWqJMv4Ksel
+DB_SSLMODE=require
+
+# Frontend URL - Use your server's IP address for network access
+FRONTEND_URL=http://localhost:5173
+
+# Email Settings (Optional - for notifications)
+EMAIL_USER=aghimire012@gmail.com
+EMAIL_APP_PASSWORD=dnjd noik pyrd ikjk
+
+# Server Settings
+PORT=8000
+HOST=localhost
+# Google OAuth Configuration
+GOOGLE_CLIENT_ID=897228285539-k8dt0tjic9bvi2ijbjgn2o5kf77rcdbh.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=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
+GOOGLE_REDIRECT_URI=http://localhost:8000/auth/google/callback
