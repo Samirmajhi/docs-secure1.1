@@ -5,6 +5,59 @@ import { toast } from 'sonner';
 const API_URL = 'http://localhost:8000/api';
 console.log('API URL configured as:', API_URL);
 
+// Function to check if token is expired
+const isTokenExpired = (token) => {
+  if (!token) return true;
+  
+  try {
+    // Get the expiration time from the token
+    const base64Url = token.split('.')[1];
+    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+    const payload = JSON.parse(window.atob(base64));
+    
+    // JWT exp is in seconds, Date.now() is in milliseconds
+    const expirationTime = payload.exp * 1000;
+    return Date.now() >= expirationTime;
+  } catch (e) {
+    console.error('Error checking token expiration:', e);
+    return true; // Assume expired if we can't parse it
+  }
+};
+
+// Function to get user info from token
+const getUserInfoFromToken = (token) => {
+  if (!token) return null;
+  
+  try {
+    // Parse the token payload
+    const base64Url = token.split('.')[1];
+    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(window.atob(base64));
+  } catch (e) {
+    console.error('Error extracting user info from token:', e);
+    return null;
+  }
+};
+
+// Check if the current token is about to expire and needs a refresh
+const shouldRefreshToken = (token) => {
+  if (!token) return false;
+  
+  try {
+    const base64Url = token.split('.')[1];
+    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+    const payload = JSON.parse(window.atob(base64));
+    
+    // If token is less than 30 minutes from expiring, refresh it
+    const expirationTime = payload.exp * 1000;
+    const thirtyMinutes = 30 * 60 * 1000;
+    
+    return (expirationTime - Date.now()) < thirtyMinutes;
+  } catch (e) {
+    return false;
+  }
+};
+
 // Create API instance
 const api = axios.create({
   baseURL: API_URL,
@@ -17,21 +70,52 @@ const api = axios.create({
 
 // Add token to requests if available
 api.interceptors.request.use(
-  (config) => {
+  async (config) => {
     const token = localStorage.getItem('token');
     const ownerToken = localStorage.getItem('ownerToken');
     
+    // Check if token is expired
+    if (token && isTokenExpired(token)) {
+      console.warn('Token is expired, clearing authentication data');
+      // Clear expired tokens
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      
+      // Redirect to login page if not already there
+      if (!window.location.pathname.includes('/login') && !window.location.pathname.includes('/register')) {
+        toast.error('Your session has expired. Please log in again.');
+        window.location.href = '/login';
+        // This will abort the current request
+        return Promise.reject(new Error('Authentication expired'));
+      }
+    }
+    
+    // Handle owner token or regular user token
     if (ownerToken) {
       config.headers.Authorization = `Bearer ${ownerToken}`;
     } else if (token) {
       config.headers.Authorization = `Bearer ${token}`;
+      
+      // Only attempt refresh for authenticated user routes, not authentication routes
+      if (shouldRefreshToken(token) && !config.url?.includes('/auth/')) {
+        // We'll handle this in a future enhancement - ideally implement a token refresh endpoint
+        console.log('Token will expire soon, should implement refresh mechanism');
+      }
     }
+    
+    // Log user ID from token for debugging
+    const userInfo = getUserInfoFromToken(token || ownerToken);
+    const userId = userInfo?.id;
     
     console.log('Making API request:', {
       method: config.method?.toUpperCase(),
       url: config.url,
       baseURL: config.baseURL,
-      headers: config.headers,
+      userId: userId || 'not authenticated',
+      headers: { 
+        ...config.headers,
+        Authorization: config.headers.Authorization ? 'Bearer [TOKEN]' : 'None' // Don't log the actual token
+      },
       data: config.data,
       fullUrl: `${config.baseURL}${config.url}`
     });
@@ -66,8 +150,40 @@ api.interceptors.response.use(
       }
     });
 
+    // Handle specific authentication errors
+    if (error.response?.status === 401) {
+      // Clear auth data and redirect to login if not already there
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      
+      if (!window.location.pathname.includes('/login') && !window.location.pathname.includes('/register')) {
+        toast.error('Authentication required. Please log in again.');
+        window.location.href = '/login';
+      }
+    } 
+    else if (error.response?.status === 403) {
+      toast.error('Your session token is invalid. Please log in again.');
+      
+      // Only redirect if not already on login/register page
+      if (!window.location.pathname.includes('/login') && !window.location.pathname.includes('/register')) {
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        window.location.href = '/login';
+      }
+    }
+    else if (error.response?.status === 404 && error.response?.data?.message?.includes('User not found')) {
+      // Special handling for user not found errors, which often mean the user was deleted
+      toast.error('Your account information was not found. Please log in again.');
+      
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      
+      if (!window.location.pathname.includes('/login') && !window.location.pathname.includes('/register')) {
+        window.location.href = '/login';
+      }
+    }
     // Handle network errors
-    if (error.code === 'ERR_NETWORK') {
+    else if (error.code === 'ERR_NETWORK') {
       toast.error('Network error. Please check your connection and try again.');
     } else if (error.response?.data?.message) {
       toast.error(error.response.data.message);

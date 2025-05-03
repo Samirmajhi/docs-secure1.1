@@ -1,16 +1,28 @@
-
 import React, { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { FileText, Upload, QrCode, User, ArrowRight } from 'lucide-react';
+import { FileText, Upload, QrCode, User, ArrowRight, Crown, ChevronRight } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import Navbar from '@/components/layout/Navbar';
 import { motion } from 'framer-motion';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
 import documentService from '@/services/document.service';
+import subscriptionService from '@/services/subscription.service';
+import SubscriptionManager from '@/components/SubscriptionManager';
+import { Card, CardContent } from '@/components/ui/card';
+import { Progress } from '@/components/ui/progress';
+import eventBus from '@/utils/eventBus';
+import { useQueryClient } from '@tanstack/react-query';
+
+const formatStorage = (bytes: number): string => {
+  const mb = bytes / (1024 * 1024);
+  return `${mb.toFixed(1)} MB`;
+};
 
 const Dashboard = () => {
   const { user } = useAuth();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [stats, setStats] = useState({
     documents: 0,
     storage: '0 MB',
@@ -21,22 +33,112 @@ const Dashboard = () => {
   const { data: documents = [] } = useQuery({
     queryKey: ['documents'],
     queryFn: documentService.getDocuments,
-    staleTime: 60000 // 1 minute
+    staleTime: 60000, // 1 minute
+    retry: 3,
+    retryDelay: 1000
   });
 
+  // Fetch subscription data with more generous retry
+  const { data: subscription, isError: subError, isLoading: subLoading, refetch: refetchSubscription } = useQuery({
+    queryKey: ['subscription'],
+    queryFn: subscriptionService.getCurrentSubscription,
+    staleTime: 60000, // 1 minute
+    refetchOnWindowFocus: true,
+    refetchOnMount: true,
+    retry: 3,
+    retryDelay: 1000
+  });
+
+  // Fetch storage usage with more generous retry
+  const { data: storageUsage, isError: storageError, isLoading: storageLoading, refetch: refetchStorage } = useQuery({
+    queryKey: ['storage'],
+    queryFn: subscriptionService.getStorageUsage,
+    staleTime: 60000, // 1 minute
+    refetchOnWindowFocus: true,
+    refetchOnMount: true,
+    retry: 3,
+    retryDelay: 1000
+  });
+
+  // Debug logging
   useEffect(() => {
-    if (documents.length) {
-      // Calculate total storage
-      const totalBytes = documents.reduce((sum: number, doc: any) => sum + (doc.size || 0), 0);
-      const totalMB = (totalBytes / (1024 * 1024)).toFixed(1);
-      
-      setStats({
-        documents: documents.length,
-        storage: `${totalMB} MB`,
-        shared: 0 // In a real app, we would track shared documents
-      });
-    }
-  }, [documents]);
+    console.log('Subscription data:', subscription || 'Not available');
+    console.log('Storage usage data:', storageUsage || 'Not available');
+    console.log('Subscription loading:', subLoading);
+    console.log('Subscription error:', subError);
+    console.log('Storage loading:', storageLoading);
+    console.log('Storage error:', storageError);
+  }, [subscription, storageUsage, subLoading, subError, storageLoading, storageError]);
+
+  // Force refresh subscription data on mount and when subscription-updated event is fired
+  useEffect(() => {
+    // Function to refresh data
+    const refreshData = async () => {
+      console.log('Refreshing subscription and storage data...');
+      try {
+        // Use Promise.allSettled to handle partial failures
+        const results = await Promise.allSettled([
+          refetchSubscription(),
+          refetchStorage()
+        ]);
+        
+        // Check results
+        if (results[0].status === 'fulfilled') {
+          console.log('Fresh subscription data:', results[0].value.data || 'Not available');
+          
+          // Force rerender with fresh data if available
+          if (results[0].value.data) {
+            const newSubData = {...results[0].value.data};
+            queryClient.setQueryData(['subscription'], newSubData);
+          }
+        } else {
+          console.error('Failed to refresh subscription data:', results[0].reason);
+        }
+        
+        if (results[1].status === 'fulfilled') {
+          console.log('Fresh storage data:', results[1].value.data || 'Not available');
+          
+          if (results[1].value.data) {
+            const newStorageData = {...results[1].value.data};
+            queryClient.setQueryData(['storage'], newStorageData);
+          }
+        } else {
+          console.error('Failed to refresh storage data:', results[1].reason);
+        }
+      } catch (error) {
+        console.error('Error refreshing data:', error);
+      }
+    };
+
+    // Refresh on mount
+    refreshData();
+    
+    // Listen for subscription updates
+    eventBus.on('subscription-updated', refreshData);
+    
+    // Cleanup
+    return () => {
+      eventBus.off('subscription-updated', refreshData);
+    };
+  }, [refetchSubscription, refetchStorage, queryClient]);
+
+  // Get subscription and storage display values with fallbacks
+  const subscriptionName = subscription?.name || 'Free';
+  const storageUsed = storageUsage?.used || 0; 
+  const storageLimit = storageUsage?.limit || 5 * 1024 * 1024; // Default 5MB
+
+  // Calculate storage usage percentage with safety check to avoid division by zero
+  const storagePercentage = storageLimit > 0 ? (storageUsed / storageLimit * 100) : 0;
+
+  // Update stats when documents or storage data changes
+  useEffect(() => {
+    // Update stats whenever documents or storage usage changes
+    setStats(prevStats => ({
+      documents: Array.isArray(documents) ? documents.length : 0,
+      storage: storageUsage && typeof storageUsage.used === 'number' ? formatStorage(storageUsage.used) : '0 MB',
+      shared: prevStats.shared
+    }));
+  }, [documents, storageUsage]);
 
   const features = [
     {
@@ -72,28 +174,59 @@ const Dashboard = () => {
           transition={{ duration: 0.5 }}
           className="max-w-5xl mx-auto"
         >
-          {/* Welcome Card */}
+          {/* Welcome Card with Subscription Info */}
           <div className="bg-gradient-to-r from-primary/90 to-tertiary/90 rounded-2xl p-8 text-white mb-8 relative overflow-hidden">
             <div className="absolute top-0 right-0 w-64 h-64 bg-white/10 rounded-full -mt-32 -mr-32" />
             <div className="absolute bottom-0 left-0 w-32 h-32 bg-white/5 rounded-full -mb-16 -ml-16" />
-            
             <div className="relative z-10">
-              <h1 className="text-3xl font-bold mb-2">Welcome back, {user?.fullName || 'User'}</h1>
-              <p className="text-white/80 mb-6 max-w-xl">
-                Your documents are secure and ready for management. What would you like to do today?
-              </p>
-              
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+                <div>
+                  <h1 className="text-3xl font-bold mb-2">Welcome back, {user?.fullName || 'User'}</h1>
+                  <p className="text-white/80 max-w-xl">
+                    Your documents are secure and ready for management. What would you like to do today?
+                  </p>
+                </div>
+                {/* Subscription Card - clickable, navigate to subscription page */}
+                <div className="w-full max-w-sm sm:w-auto">
+                  <Card 
+                    className="bg-white/80 backdrop-blur-md border-white/30 shadow-lg transition-all hover:shadow-xl hover:scale-105 cursor-pointer"
+                    onClick={() => navigate('/subscription')}
+                  >
+                    <CardContent className="p-4">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <Crown className="h-5 w-5 text-yellow-500" />
+                          <span className="font-semibold text-primary">
+                            {subscriptionName} Plan
+                          </span>
+                        </div>
+                        <ChevronRight className="h-4 w-4 text-primary/60" />
+                      </div>
+                      <div className="space-y-2">
+                        <div className="flex justify-between text-sm text-primary">
+                          <span>Storage</span>
+                          <span>
+                            {formatStorage(storageUsed)} / {formatStorage(storageLimit)}
+                          </span>
+                        </div>
+                        <Progress 
+                          value={storagePercentage} 
+                          className="h-2 bg-primary/20"
+                        />
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+              </div>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
                 <div className="bg-white/10 backdrop-blur-sm rounded-xl p-4 border border-white/20">
                   <div className="text-white/70 text-sm mb-1">Documents</div>
                   <div className="text-2xl font-bold">{stats.documents}</div>
                 </div>
-                
                 <div className="bg-white/10 backdrop-blur-sm rounded-xl p-4 border border-white/20">
                   <div className="text-white/70 text-sm mb-1">Storage Used</div>
                   <div className="text-2xl font-bold">{stats.storage}</div>
                 </div>
-                
                 <div className="bg-white/10 backdrop-blur-sm rounded-xl p-4 border border-white/20">
                   <div className="text-white/70 text-sm mb-1">Shared</div>
                   <div className="text-2xl font-bold">{stats.shared}</div>

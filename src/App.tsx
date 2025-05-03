@@ -17,6 +17,7 @@ import AccessRequestResponse from "./pages/AccessRequestResponse";
 import ApprovedDocuments from "./pages/ApprovedDocuments";
 import AuthCallback from "./pages/AuthCallback";
 import AuthError from "./pages/AuthError";
+import Subscription from "./pages/Subscription";
 
 const queryClient = new QueryClient();
 
@@ -64,6 +65,11 @@ const App = () => (
             } />
             <Route path="/approved-documents/:requestId" element={<ApprovedDocuments />} />
             <Route path="/access-request/:requestId" element={<AccessRequestDetails />} />
+            <Route path="/subscription" element={
+              <ProtectedRoute>
+                <Subscription />
+              </ProtectedRoute>
+            } />
             {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
             <Route path="*" element={<NotFound />} />
           </Routes>

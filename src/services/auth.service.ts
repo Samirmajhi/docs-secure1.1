@@ -9,8 +9,8 @@ interface RegisterRequest {
   email: string;
   password: string;
   fullName: string;
-  mobileNumber: string;
-  pin: string;
+  mobileNumber?: string;
+  subscriptionId: number;
 }
 
 export interface User {

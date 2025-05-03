@@ -107,21 +107,21 @@ if (process.env.EMAIL_USER && process.env.EMAIL_APP_PASSWORD) {
   transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_APP_PASSWORD
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_APP_PASSWORD
     },
     debug: false,
     logger: false
-  });
+});
 
-  // Verify the connection configuration
-  transporter.verify(function(error, success) {
+// Verify the connection configuration
+transporter.verify(function(error, success) {
     if (error) {
       console.warn('Email configuration warning:', error.message);
     } else {
-      console.log('Email server is ready to send messages');
+        console.log('Email server is ready to send messages');
     }
-  });
+});
 } else {
   console.log('Email configuration not found - email notifications will be disabled');
 }
@@ -133,44 +133,44 @@ const sendEmail = async (to, subject, message, requestId) => {
     return false;
   }
 
-  try {
-    if (!to) {
-      console.error('Recipient email address is required');
-      return false;
+    try {
+        if (!to) {
+            console.error('Recipient email address is required');
+            return false;
+        }
+
+        const htmlMessage = `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <h2 style="color: #333;">Document Access Request</h2>
+                <p style="color: #666;">${message}</p>
+                <div style="margin: 30px 0;">
+                    <a href="${process.env.FRONTEND_URL}/access-requests/${requestId}" 
+                        style="display: inline-block; padding: 12px 24px; background-color: #007bff; color: white; text-decoration: none; border-radius: 4px;">
+                        Review Request
+                    </a>
+                </div>
+                <p style="color: #999; font-size: 12px;">
+                    If the button above doesn't work, copy and paste this link into your browser:<br>
+                    ${process.env.FRONTEND_URL}/access-requests/${requestId}
+                </p>
+            </div>
+        `;
+
+        const mailOptions = {
+            from: process.env.EMAIL_USER,
+            to,
+            subject,
+            html: htmlMessage
+        };
+
+        console.log('Attempting to send email to:', to);
+        const info = await transporter.sendMail(mailOptions);
+        console.log('Email sent successfully:', info.messageId);
+        return true;
+    } catch (error) {
+        console.error('Error sending email:', error);
+        return false;
     }
-
-    const htmlMessage = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: #333;">Document Access Request</h2>
-        <p style="color: #666;">${message}</p>
-        <div style="margin: 30px 0;">
-          <a href="${process.env.FRONTEND_URL}/access-requests/${requestId}" 
-            style="display: inline-block; padding: 12px 24px; background-color: #007bff; color: white; text-decoration: none; border-radius: 4px;">
-            Review Request
-          </a>
-        </div>
-        <p style="color: #999; font-size: 12px;">
-          If the button above doesn't work, copy and paste this link into your browser:<br>
-          ${process.env.FRONTEND_URL}/access-requests/${requestId}
-        </p>
-      </div>
-    `;
-
-    const mailOptions = {
-      from: process.env.EMAIL_USER,
-      to,
-      subject,
-      html: htmlMessage
-    };
-
-    console.log('Attempting to send email to:', to);
-    const info = await transporter.sendMail(mailOptions);
-    console.log('Email sent successfully:', info.messageId);
-    return true;
-  } catch (error) {
-    console.error('Error sending email:', error);
-    return false;
-  }
 };
 
 const __filename = fileURLToPath(import.meta.url);
@@ -223,16 +223,63 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 
 // Authentication middleware
 const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-  
-  if (!token) return res.status(401).json({ message: 'Authentication token required' });
-  
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ message: 'Invalid or expired token' });
-    req.user = user;
-    next();
-  });
+  try {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    
+    console.log(`Authentication attempt for ${req.method} ${req.path}`);
+    
+    if (!token) {
+      console.error('Authentication failed: No token provided');
+      return res.status(401).json({ 
+        message: 'Authentication token required',
+        error: 'token_missing'
+      });
+    }
+    
+    jwt.verify(token, JWT_SECRET, async (err, user) => {
+      if (err) {
+        console.error('Authentication failed: Token verification error', err.message);
+        if (err.name === 'TokenExpiredError') {
+          return res.status(401).json({ 
+            message: 'Your session has expired. Please log in again.',
+            error: 'token_expired' 
+          });
+        }
+        return res.status(403).json({ 
+          message: 'Invalid token. Please log in again.',
+          error: 'token_invalid' 
+        });
+      }
+      
+      // Validate that the user exists in the database before proceeding
+      if (user && user.id) {
+        try {
+          const userCheck = await pool.query('SELECT id FROM users WHERE id = $1', [user.id]);
+          if (userCheck.rows.length === 0) {
+            console.error(`Authentication failed: User ${user.id} from token not found in database`);
+            return res.status(404).json({ 
+              message: 'User account not found. You may need to register again.',
+              error: 'user_not_found'
+            });
+          }
+        } catch (dbError) {
+          console.error('Database error in token validation:', dbError);
+          // Continue processing even if validation fails
+        }
+      }
+      
+      console.log(`Authenticated user: ${user.id} (${user.email || 'email not in token'})`);
+      req.user = user;
+      next();
+    });
+  } catch (error) {
+    console.error('Unexpected error in authentication middleware:', error);
+    return res.status(500).json({ 
+      message: 'Server error during authentication',
+      error: 'auth_server_error'
+    });
+  }
 };
 
 // Configure multer for memory storage
@@ -246,45 +293,72 @@ const upload = multer({
 // User Routes
 app.post('/api/auth/register', async (req, res) => {
   try {
-    const { email, password, fullName, mobileNumber, pin } = req.body;
-    console.log('Registration attempt for email:', email);
-    
-    if (!email || !password || !fullName) {
-      console.log('Registration failed: Missing required fields');
-      return res.status(400).json({ message: 'Email, password, and full name are required' });
-    }
+    const { email, password, fullName, mobileNumber, subscriptionId } = req.body;
     
     // Check if user already exists
-    const userCheck = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-    if (userCheck.rows.length > 0) {
-      console.log('Registration failed: User already exists');
-      return res.status(400).json({ message: 'User already exists with this email' });
+    const userExists = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (userExists.rows.length > 0) {
+      return res.status(400).json({ message: 'User already exists' });
     }
     
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
     
-    // Insert new user
-    const result = await pool.query(
-      'INSERT INTO users (id, email, password_hash, full_name, mobile_number, security_pin) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, email, full_name',
-      [uuidv4(), email, hashedPassword, fullName, mobileNumber, pin]
-    );
+    // Start a transaction
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Get free plan id if no subscription is provided
+      let userSubscriptionId = subscriptionId;
+      if (!userSubscriptionId) {
+        const freePlanResult = await client.query('SELECT id FROM subscription_plans WHERE name = $1', ['Free']);
+        if (freePlanResult.rows.length > 0) {
+          userSubscriptionId = freePlanResult.rows[0].id;
+        } else {
+          throw new Error('Free plan not found');
+        }
+      }
+
+      // Create user with correct column names
+      const userResult = await client.query(
+        'INSERT INTO users (id, email, password_hash, full_name, mobile_number, subscription_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
+        [uuidv4(), email, hashedPassword, fullName, mobileNumber, userSubscriptionId]
+      );
     
-    // Generate token
-    const user = result.rows[0];
-    const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '24h' });
-    
-    console.log('Registration successful for user:', { id: user.id, email: user.email });
+      const userId = userResult.rows[0].id;
+
+      // Create initial subscription
+      await client.query(
+        'INSERT INTO user_subscriptions (user_id, plan_id, status) VALUES ($1, $2, $3)',
+        [userId, userSubscriptionId, 'active']
+      );
+
+      await client.query('COMMIT');
+
+      // Generate token for immediate login
+      const token = jwt.sign(
+        { id: userId, email },
+        JWT_SECRET,
+        { expiresIn: '24h' }
+      );
     
     res.status(201).json({
       message: 'User registered successfully',
       token,
       user: {
-        id: user.id,
-        email: user.email,
-        fullName: user.full_name
+          id: userId,
+          email,
+          fullName,
+          mobileNumber
       }
     });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   } catch (error) {
     console.error('Registration error:', error);
     res.status(500).json({ message: 'Server error during registration' });
@@ -320,6 +394,44 @@ app.post('/api/auth/login', async (req, res) => {
     if (!validPassword) {
       console.log('Login failed: Invalid password');
       return res.status(401).json({ message: 'Invalid email or password' });
+    }
+    
+    // Check if user has a subscription_id, if not, assign Free plan
+    if (!user.subscription_id) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        
+        // Get free plan id
+        const freePlanResult = await client.query('SELECT id FROM subscription_plans WHERE name = $1', ['Free']);
+        if (freePlanResult.rows.length > 0) {
+          const freePlanId = freePlanResult.rows[0].id;
+          
+          // Update user with free plan
+          await client.query('UPDATE users SET subscription_id = $1 WHERE id = $2', [freePlanId, user.id]);
+          
+          // Check if user has an active subscription
+          const subResult = await client.query(
+            'SELECT * FROM user_subscriptions WHERE user_id = $1 AND status = $2',
+            [user.id, 'active']
+          );
+          
+          // Create subscription if not exists
+          if (subResult.rows.length === 0) {
+            await client.query(
+              'INSERT INTO user_subscriptions (user_id, plan_id, status) VALUES ($1, $2, $3)',
+              [user.id, freePlanId, 'active']
+            );
+          }
+          
+          await client.query('COMMIT');
+        }
+      } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('Error updating user subscription:', error);
+      } finally {
+        client.release();
+      }
     }
     
     // Generate token
@@ -409,6 +521,14 @@ app.put('/api/user/profile', authenticateToken, async (req, res) => {
 // Document Routes
 app.post('/api/documents/upload', authenticateToken, upload.single('file'), async (req, res) => {
   try {
+    console.log('Document upload request from user:', req.user?.id || 'Unknown user');
+    console.log('Request headers:', req.headers);
+    
+    if (!req.user || !req.user.id) {
+      console.error('Authentication error: user information missing in request.');
+      return res.status(401).json({ message: 'Authentication required. Please log in again.' });
+    }
+    
     if (!req.file) {
       return res.status(400).json({ message: 'No file uploaded' });
     }
@@ -421,41 +541,136 @@ app.post('/api/documents/upload', authenticateToken, upload.single('file'), asyn
       tags: req.body.tags ? JSON.parse(req.body.tags) : []
     };
 
-    const result = await documentStorage.uploadDocument(userId, file, metadata);
-
-    // Store document metadata in database
-    const dbResult = await pool.query(
-      'INSERT INTO documents (id, user_id, name, type, size, file_path, file_id, metadata) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *',
-      [
-        result.documentId,
-        userId,
-        metadata.customName,
-        file.mimetype,
-        file.size,
-        result.filePath,
-        result.fileId,
-        result.metadata
-      ]
-    );
-
-    res.status(201).json({
-      message: 'Document uploaded successfully',
-      document: dbResult.rows[0]
+    console.log('Uploading document:', {
+      filename: file.originalname,
+      size: file.size,
+      type: file.mimetype,
+      customName: metadata.customName,
+      userId: userId
     });
+
+    // Check if user exists in database with more detailed error reporting
+    try {
+      const userExists = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
+      if (userExists.rows.length === 0) {
+        console.error(`User not found in database: ${userId}`);
+        // Log token details for debugging (excluding sensitive parts)
+        console.error('Token user info:', {
+          id: req.user.id,
+          email: req.user.email ? '(email exists)' : '(no email in token)'
+        });
+        return res.status(404).json({ 
+          message: 'User not found in database. Please log in again.',
+          error: 'user_not_found'
+        });
+      }
+    } catch (dbError) {
+      console.error('Database error checking user existence:', dbError);
+      return res.status(500).json({ 
+        message: 'Database error during user verification',
+        error: 'database_error' 
+      });
+    }
+
+    // Check if user has enough storage space based on their subscription plan
+    const storageResult = await pool.query(`
+      SELECT 
+        u.storage_used as used,
+        sp.storage_limit as limit,
+        (u.storage_used + $1) as would_be_used,
+        CASE 
+          WHEN sp.storage_limit = 0 THEN true
+          ELSE (u.storage_used + $1) <= sp.storage_limit
+        END as has_available_storage,
+        sp.name as plan_name
+      FROM users u
+      JOIN subscription_plans sp ON u.subscription_id = sp.id
+      WHERE u.id = $2
+    `, [file.size, userId]);
+
+    if (storageResult.rows.length === 0) {
+      return res.status(404).json({ message: 'User subscription information not found' });
+    }
+
+    const storageInfo = storageResult.rows[0];
+    console.log('Storage check:', storageInfo);
+
+    // If user doesn't have enough storage space, return an error
+    if (!storageInfo.has_available_storage) {
+      return res.status(413).json({
+        message: 'Storage limit exceeded',
+        error: 'subscription_limit_exceeded',
+        details: {
+          used: storageInfo.used,
+          limit: storageInfo.limit,
+          would_be_used: storageInfo.would_be_used,
+          plan_name: storageInfo.plan_name
+        }
+      });
+    }
+
+    try {
+      const result = await documentStorage.uploadDocument(userId, file, metadata);
+
+      // Store document metadata in database
+      const dbResult = await pool.query(
+        'INSERT INTO documents (id, user_id, name, type, size, file_path, file_id, metadata) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *',
+        [
+          result.documentId,
+          userId,
+          metadata.customName,
+          file.mimetype,
+          file.size,
+          result.filePath,
+          result.fileId,
+          result.metadata
+        ]
+      );
+
+      // Update the user's storage used
+      await pool.query(
+        'UPDATE users SET storage_used = storage_used + $1 WHERE id = $2',
+        [file.size, userId]
+      );
+
+      console.log(`Document uploaded successfully for user ${userId}: ${result.documentId}`);
+      
+      res.status(201).json({
+        message: 'Document uploaded successfully',
+        document: dbResult.rows[0]
+      });
+    } catch (uploadError) {
+      console.error('Document upload error details:', uploadError);
+      if (uploadError.response?.data) {
+        // Send the specific B2 error message
+        return res.status(500).json({ 
+          message: 'Storage service error during upload',
+          details: uploadError.response.data.message || uploadError.message 
+        });
+      }
+      throw uploadError; // re-throw to be caught by the outer catch
+    }
   } catch (error) {
     console.error('Document upload error:', error);
-    res.status(500).json({ message: 'Server error during document upload' });
+    res.status(500).json({ 
+      message: 'Server error during document upload',
+      details: error.message
+    });
   }
 });
 
 app.get('/api/documents', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
+    console.log('Fetching documents for user:', userId);
     
     const result = await pool.query(
       'SELECT * FROM documents WHERE user_id = $1 ORDER BY created_at DESC',
       [userId]
     );
+    
+    console.log('Found documents:', result.rows.length);
+    console.log('Documents:', result.rows);
     
     res.json(result.rows);
   } catch (error) {
@@ -1232,6 +1447,7 @@ class B2ApiManager {
       );
 
       const fileName = fileInfoResponse.data.fileName;
+      console.log('Download file name (from B2):', fileName);
       
       // Get a pre-signed URL for the file
       const downloadAuthResponse = await axios.get(
@@ -1248,8 +1464,12 @@ class B2ApiManager {
 
       const authToken = downloadAuthResponse.data.authorizationToken;
       
+      // The fileName is already URL-encoded from B2, so we can use it directly
       // Construct the download URL with authorization token
-      return `${this.downloadUrl}/file/${b2Config.bucketName}/${fileName}?Authorization=${authToken}`;
+      const downloadUrl = `${this.downloadUrl}/file/${b2Config.bucketName}/${fileName}?Authorization=${authToken}`;
+      console.log('Generated download URL:', downloadUrl);
+      
+      return downloadUrl;
     } catch (error) {
       console.error('B2 get download URL error:', error.response?.data || error.message);
       throw error;
@@ -1264,12 +1484,17 @@ class B2ApiManager {
 
       const sha1 = crypto.createHash('sha1').update(fileBuffer).digest('hex');
 
+      // URL encode the file name to handle spaces and special characters
+      const encodedFileName = encodeURIComponent(fileName);
+      console.log('Original file name:', fileName);
+      console.log('Encoded file name:', encodedFileName);
+
       const response = await axios.post(this.uploadUrl, fileBuffer, {
         headers: {
           'Authorization': this.uploadAuthToken,
           'Content-Type': contentType,
           'Content-Length': fileBuffer.length,
-          'X-Bz-File-Name': fileName,
+          'X-Bz-File-Name': encodedFileName,
           'X-Bz-Content-Sha1': sha1
         }
       });
@@ -1290,11 +1515,18 @@ class DocumentStorageManager {
 
   // Generate document path
   getDocumentPath(userId, documentId, version = 'latest', filename = null) {
+    // Sanitize the filename by removing any invalid characters
+    let sanitizedFilename = filename;
+    if (sanitizedFilename) {
+      // Replace any characters that might cause issues but keep spaces (they'll be URL-encoded later)
+      sanitizedFilename = sanitizedFilename.replace(/[/\\?%*:|"<>]/g, '_');
+    }
+    
     const basePath = `users/${userId}/documents/${documentId}`;
     if (version !== 'latest') {
-      return `${basePath}/versions/${version}/${filename}`;
+      return `${basePath}/versions/${version}/${sanitizedFilename}`;
     }
-    return `${basePath}/${filename}`;
+    return `${basePath}/${sanitizedFilename}`;
   }
 
   // Upload document with metadata
@@ -1302,7 +1534,7 @@ class DocumentStorageManager {
     try {
       const documentId = uuidv4();
       const filePath = this.getDocumentPath(userId, documentId, 'latest', file.originalname);
-      
+
       // Create document metadata
       const documentMetadata = {
         ...metadata,
@@ -1377,97 +1609,427 @@ class DocumentStorageManager {
 // Initialize document storage manager
 const documentStorage = new DocumentStorageManager();
 
-// Start server
-app.listen(PORT, HOST, () => {
-  console.log(`Server running on http://${HOST}:${PORT}`);
+// Drop and recreate all tables on server start
+const initializeDatabase = async () => {
+  try {
+    // Create tables if they don't exist (instead of dropping and recreating)
+    await pool.query(`
+      -- First create subscription_plans table if it doesn't exist
+      CREATE TABLE IF NOT EXISTS subscription_plans (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(50) UNIQUE NOT NULL,
+        storage_limit BIGINT NOT NULL,
+        price DECIMAL(10,2),
+        features JSONB,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      -- Insert default subscription plans if they don't exist
+      INSERT INTO subscription_plans (name, storage_limit, price, features) 
+      VALUES 
+        ('Free', 5242880, 0, '{"features": ["Basic document upload", "Unlimited QR codes", "Standard security", "Community support"]}'),
+        ('Pro', 15728640, 9.99, '{"features": ["Advanced document management", "Unlimited QR codes", "Priority support", "Document versioning", "Custom expiration"]}'),
+        ('Enterprise', 0, null, '{"features": ["Custom storage limit", "Team management", "API access", "Custom integrations", "Dedicated support"]}')
+      ON CONFLICT (name) DO NOTHING;
+
+      -- Create users table if it doesn't exist
+      CREATE TABLE IF NOT EXISTS users (
+        id VARCHAR(100) PRIMARY KEY,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        password_hash VARCHAR(255),
+        full_name VARCHAR(255),
+        mobile_number VARCHAR(50),
+        security_pin VARCHAR(6),
+        is_google_auth BOOLEAN DEFAULT false,
+        subscription_id INTEGER REFERENCES subscription_plans(id),
+        storage_used BIGINT DEFAULT 0,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT auth_check CHECK (
+          (password_hash IS NOT NULL) OR 
+          (is_google_auth = true)
+        )
+      );
+
+      -- Create user subscriptions table if it doesn't exist
+      CREATE TABLE IF NOT EXISTS user_subscriptions (
+        id SERIAL PRIMARY KEY,
+        user_id VARCHAR(100) REFERENCES users(id),
+        plan_id INTEGER REFERENCES subscription_plans(id),
+        storage_used BIGINT DEFAULT 0,
+        status VARCHAR(20) DEFAULT 'active',
+        start_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        end_date TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      -- Create documents table if it doesn't exist
+      CREATE TABLE IF NOT EXISTS documents (
+        id VARCHAR(100) PRIMARY KEY,
+        user_id VARCHAR(100) REFERENCES users(id) ON DELETE CASCADE,
+        name VARCHAR(255) NOT NULL,
+        type VARCHAR(100) NOT NULL,
+        size INTEGER NOT NULL,
+        file_path VARCHAR(500) NOT NULL,
+        file_id VARCHAR(100),
+        metadata JSONB,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+
+      -- Create QR codes table if it doesn't exist
+      CREATE TABLE IF NOT EXISTS qr_codes (
+        id VARCHAR(100) PRIMARY KEY,
+        user_id VARCHAR(100) REFERENCES users(id) ON DELETE CASCADE,
+        code VARCHAR(100) UNIQUE NOT NULL,
+        access_code VARCHAR(50),
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        expires_at TIMESTAMP WITH TIME ZONE
+      );
+
+      -- Create access requests table if it doesn't exist
+      CREATE TABLE IF NOT EXISTS access_requests (
+        id VARCHAR(100) PRIMARY KEY,
+        qr_code_id VARCHAR(100) REFERENCES qr_codes(id) ON DELETE CASCADE,
+        requester_name VARCHAR(255) NOT NULL,
+        status VARCHAR(50) NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+
+      -- Create requested documents table if it doesn't exist
+      CREATE TABLE IF NOT EXISTS requested_documents (
+        id VARCHAR(100) PRIMARY KEY,
+        access_request_id VARCHAR(100) REFERENCES access_requests(id) ON DELETE CASCADE,
+        document_id VARCHAR(100) REFERENCES documents(id) ON DELETE CASCADE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    console.log('Database tables created or verified successfully');
+  } catch (error) {
+    console.error('Error initializing database:', error);
+    throw error;
+  }
+};
+
+// Initialize database before starting server
+initializeDatabase().then(() => {
+  // Start server
+  app.listen(PORT, HOST, () => {
+    console.log(`Server running on http://${HOST}:${PORT}`);
+  });
+}).catch(error => {
+  console.error('Failed to initialize database:', error);
+  process.exit(1);
 });
 
-// For testing purposes - create tables if they don't exist
-pool.query(`
-  CREATE TABLE IF NOT EXISTS users (
-    id VARCHAR(100) PRIMARY KEY,
-    email VARCHAR(255) UNIQUE NOT NULL,
-    password_hash VARCHAR(255),
-    full_name VARCHAR(255),
-    mobile_number VARCHAR(50),
-    security_pin VARCHAR(6),
-    is_google_auth BOOLEAN DEFAULT false,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT auth_check CHECK (
-      (password_hash IS NOT NULL) OR 
-      (is_google_auth = true)
-    )
-  );
+// Subscription endpoints
+app.get('/api/subscription/plans', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM subscription_plans ORDER BY price ASC');
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching subscription plans:', error);
+    res.status(500).json({ error: 'Failed to fetch subscription plans' });
+  }
+});
 
-  -- Add is_google_auth column if it doesn't exist
-  DO $$
-  BEGIN
-    IF NOT EXISTS (
-      SELECT 1 
-      FROM information_schema.columns 
-      WHERE table_name = 'users' 
-      AND column_name = 'is_google_auth'
-    ) THEN
-      ALTER TABLE users ADD COLUMN is_google_auth BOOLEAN DEFAULT false;
-    END IF;
-  END $$;
+app.get('/api/subscription/user', authenticateToken, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const userId = req.user.id;
+    await client.query('BEGIN');
+    
+    // Check if user has a subscription plan
+    const userResult = await client.query(
+      'SELECT subscription_id FROM users WHERE id = $1',
+      [userId]
+    );
+    
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    // If user doesn't have a subscription, assign Free plan
+    if (!userResult.rows[0].subscription_id) {
+      const freePlanResult = await client.query('SELECT id FROM subscription_plans WHERE name = $1', ['Free']);
+      if (freePlanResult.rows.length > 0) {
+        const freePlanId = freePlanResult.rows[0].id;
+        
+        // Update user with free plan
+        await client.query('UPDATE users SET subscription_id = $1 WHERE id = $2', [freePlanId, userId]);
+        
+        // Create subscription if not exists
+        await client.query(
+          'INSERT INTO user_subscriptions (user_id, plan_id, status) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+          [userId, freePlanId, 'active']
+        );
+        
+        await client.query('COMMIT');
+      }
+    } else {
+      await client.query('ROLLBACK');
+    }
+    
+    // Get user subscription with plan details
+    const result = await client.query(`
+      SELECT sp.*, us.status as subscription_status, us.start_date, us.end_date
+      FROM subscription_plans sp
+      JOIN users u ON u.subscription_id = sp.id
+      LEFT JOIN user_subscriptions us ON us.user_id = u.id AND us.status = 'active'
+      WHERE u.id = $1
+    `, [userId]);
 
-  -- Make password_hash nullable if it's not already
-  DO $$
-  BEGIN
-    IF EXISTS (
-      SELECT 1 
-      FROM information_schema.columns 
-      WHERE table_name = 'users' 
-      AND column_name = 'password_hash'
-      AND is_nullable = 'NO'
-    ) THEN
-      ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;
-    END IF;
-  END $$;
+    if (result.rows.length === 0) {
+      // If no subscription found, return free plan
+      const freePlan = await client.query('SELECT * FROM subscription_plans WHERE name = $1', ['Free']);
+      return res.json({
+        ...freePlan.rows[0],
+        subscription_status: 'active',
+        start_date: new Date(),
+        end_date: null
+      });
+    }
 
-  -- Drop and recreate documents table to add new columns
-  DROP TABLE IF EXISTS documents CASCADE;
-  CREATE TABLE documents (
-    id VARCHAR(100) PRIMARY KEY,
-    user_id VARCHAR(100) REFERENCES users(id) ON DELETE CASCADE,
-    name VARCHAR(255) NOT NULL,
-    type VARCHAR(100) NOT NULL,
-    size INTEGER NOT NULL,
-    file_path VARCHAR(500) NOT NULL,
-    file_id VARCHAR(100),
-    metadata JSONB,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-  );
+    res.json(result.rows[0]);
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error fetching user subscription:', error);
+    res.status(500).json({ error: 'Failed to fetch subscription' });
+  } finally {
+    client.release();
+  }
+});
 
-  CREATE TABLE IF NOT EXISTS qr_codes (
-    id VARCHAR(100) PRIMARY KEY,
-    user_id VARCHAR(100) REFERENCES users(id) ON DELETE CASCADE,
-    code VARCHAR(100) UNIQUE NOT NULL,
-    access_code VARCHAR(50),
-    is_active BOOLEAN DEFAULT true,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    expires_at TIMESTAMP WITH TIME ZONE
-  );
+app.get('/api/subscription/storage', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const result = await pool.query(`
+      SELECT 
+        u.storage_used as used,
+        sp.storage_limit as limit,
+        CASE 
+          WHEN sp.storage_limit = 0 THEN true
+          ELSE u.storage_used < sp.storage_limit
+        END as has_available_storage
+      FROM users u
+      JOIN subscription_plans sp ON u.subscription_id = sp.id
+      WHERE u.id = $1
+    `, [userId]);
 
-  CREATE TABLE IF NOT EXISTS access_requests (
-    id VARCHAR(100) PRIMARY KEY,
-    qr_code_id VARCHAR(100) REFERENCES qr_codes(id) ON DELETE CASCADE,
-    requester_name VARCHAR(255) NOT NULL,
-    status VARCHAR(50) NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-  );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'No storage data found' });
+    }
 
-  CREATE TABLE IF NOT EXISTS requested_documents (
-    id VARCHAR(100) PRIMARY KEY,
-    access_request_id VARCHAR(100) REFERENCES access_requests(id) ON DELETE CASCADE,
-    document_id VARCHAR(100) REFERENCES documents(id) ON DELETE CASCADE,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-  );
-`).then(() => {
-  console.log('Tables created successfully');
-}).catch(err => {
-  console.error('Error creating tables:', err);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error fetching storage usage:', error);
+    res.status(500).json({ error: 'Failed to fetch storage usage' });
+  }
+});
+
+app.post('/api/subscription/update', authenticateToken, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    
+    const userId = req.user.id;
+    const { planId } = req.body;
+
+    // Verify plan exists
+    const planCheck = await client.query('SELECT * FROM subscription_plans WHERE id = $1', [planId]);
+    if (planCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Subscription plan not found' });
+    }
+
+    // Get current subscription
+    const currentSub = await client.query(`
+      SELECT us.*, sp.storage_limit 
+      FROM user_subscriptions us
+      JOIN subscription_plans sp ON us.plan_id = sp.id
+      WHERE us.user_id = $1 AND us.status = 'active'
+    `, [userId]);
+
+    // If upgrading to a plan with less storage than used, prevent the change
+    if (currentSub.rows.length > 0) {
+      const currentStorage = await client.query(
+        'SELECT storage_used FROM users WHERE id = $1',
+        [userId]
+      );
+      
+      if (currentStorage.rows[0].storage_used > planCheck.rows[0].storage_limit && planCheck.rows[0].storage_limit !== 0) {
+        return res.status(400).json({ 
+          error: 'Cannot downgrade: Current storage usage exceeds new plan limit' 
+        });
+      }
+    }
+
+    // Deactivate current subscription
+    if (currentSub.rows.length > 0) {
+      await client.query(
+        'UPDATE user_subscriptions SET status = $1, end_date = CURRENT_TIMESTAMP WHERE id = $2',
+        ['inactive', currentSub.rows[0].id]
+      );
+    }
+
+    // Update user's subscription
+    await client.query('UPDATE users SET subscription_id = $1 WHERE id = $2', [planId, userId]);
+
+    // Create new subscription
+    await client.query(`
+      INSERT INTO user_subscriptions (user_id, plan_id, status, start_date)
+      VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+    `, [userId, planId, 'active']);
+
+    await client.query('COMMIT');
+
+    res.json({ 
+      message: 'Subscription updated successfully',
+      plan: planCheck.rows[0]
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error updating subscription:', error);
+    res.status(500).json({ error: 'Failed to update subscription' });
+  } finally {
+    client.release();
+  }
+});
+
+// Check if file would exceed storage limit
+app.post('/api/documents/check-storage', authenticateToken, async (req, res) => {
+  try {
+    console.log('Check storage request from user:', req.user?.id || 'Unknown user');
+    console.log('Check storage request body:', req.body);
+    
+    if (!req.user || !req.user.id) {
+      console.error('Authentication error: user information missing in request.');
+      return res.status(401).json({ message: 'Authentication required. Please log in again.' });
+    }
+    
+    // Validate fileSize input
+    const fileSize = parseInt(req.body.fileSize);
+    
+    if (isNaN(fileSize) || fileSize <= 0) {
+      console.error('Invalid file size received:', req.body.fileSize);
+      return res.status(400).json({ message: 'Invalid file size. Please provide a positive number.' });
+    }
+    
+    const userId = req.user.id;
+    console.log('Checking storage for user:', userId, 'with file size:', fileSize);
+
+    try {
+      // Check if user exists in database with detailed error reporting
+      const userExists = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
+      
+      if (userExists.rows.length === 0) {
+        console.error(`User not found in database: ${userId}`);
+        // Log token details for debugging (excluding sensitive parts)
+        console.error('Token user info:', {
+          id: req.user.id,
+          email: req.user.email ? '(email exists)' : '(no email in token)'
+        });
+        return res.status(404).json({ 
+          message: 'User not found in database. Please log in again.',
+          error: 'user_not_found',
+          details: 'Your account information could not be found. You may need to register again.'
+        });
+      }
+
+      // Check if user has enough storage space based on their subscription plan
+      const storageResult = await pool.query(`
+        SELECT 
+          u.storage_used as used,
+          sp.storage_limit as limit,
+          (u.storage_used + $1) as would_be_used,
+          CASE 
+            WHEN sp.storage_limit = 0 THEN true
+            ELSE (u.storage_used + $1) <= sp.storage_limit
+          END as has_available_storage,
+          sp.name as plan_name
+        FROM users u
+        JOIN subscription_plans sp ON u.subscription_id = sp.id
+        WHERE u.id = $2
+      `, [fileSize, userId]);
+
+      if (storageResult.rows.length === 0) {
+        console.error(`User subscription information not found for user: ${userId}`);
+        
+        // Check if user is missing subscription_id
+        const userSubscription = await pool.query('SELECT subscription_id FROM users WHERE id = $1', [userId]);
+        
+        if (userSubscription.rows[0] && !userSubscription.rows[0].subscription_id) {
+          // User exists but has no subscription, auto-assign free plan
+          const freePlanResult = await pool.query('SELECT id FROM subscription_plans WHERE name = $1', ['Free']);
+          
+          if (freePlanResult.rows.length > 0) {
+            const freePlanId = freePlanResult.rows[0].id;
+            
+            // Update user with free plan
+            await pool.query('UPDATE users SET subscription_id = $1 WHERE id = $2', [freePlanId, userId]);
+            
+            // Return free plan limits
+            const freePlan = await pool.query(`
+              SELECT 
+                0 as used,
+                sp.storage_limit as limit,
+                $1 as would_be_used,
+                CASE 
+                  WHEN sp.storage_limit = 0 THEN true
+                  ELSE $1 <= sp.storage_limit
+                END as has_available_storage,
+                sp.name as plan_name
+              FROM subscription_plans sp
+              WHERE sp.id = $2
+            `, [fileSize, freePlanId]);
+            
+            if (freePlan.rows.length > 0) {
+              const storageInfo = freePlan.rows[0];
+              return res.json({
+                has_available_storage: storageInfo.has_available_storage,
+                storage_info: {
+                  used: storageInfo.used,
+                  limit: storageInfo.limit,
+                  would_be_used: storageInfo.would_be_used,
+                  plan_name: storageInfo.plan_name
+                }
+              });
+            }
+          }
+        }
+        
+        return res.status(404).json({ 
+          message: 'User subscription information not found',
+          error: 'subscription_not_found' 
+        });
+      }
+
+      const storageInfo = storageResult.rows[0];
+      console.log('Storage check result:', storageInfo);
+
+      res.json({
+        has_available_storage: storageInfo.has_available_storage,
+        storage_info: {
+          used: storageInfo.used,
+          limit: storageInfo.limit,
+          would_be_used: storageInfo.would_be_used,
+          plan_name: storageInfo.plan_name
+        }
+      });
+    } catch (dbError) {
+      console.error('Database error during storage check:', dbError);
+      return res.status(500).json({ 
+        message: 'Database error during storage check',
+        error: 'database_error'
+      });
+    }
+  } catch (error) {
+    console.error('Storage check error:', error);
+    res.status(500).json({ 
+      message: 'Server error during storage check',
+      error: 'server_error',
+      details: error.message
+    });
+  }
 });

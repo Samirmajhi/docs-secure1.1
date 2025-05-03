@@ -32,10 +32,17 @@ const uploadsInProgress = new Set<string>();
 const documentService = {
   getDocuments: async (): Promise<Document[]> => {
     try {
+      console.log('Fetching documents...');
       const response = await api.get('/documents');
+      console.log('Documents response:', response.data);
       return response.data;
     } catch (error) {
       console.error('Error fetching documents:', error);
+      console.error('Error details:', {
+        message: error.message,
+        response: error.response?.data,
+        status: error.response?.status
+      });
       toast.error('Failed to fetch documents. Please try again later.');
       return [];
     }
@@ -73,14 +80,21 @@ const documentService = {
       console.log('Upload completed successfully for:', file.name);
       
       return response.data;
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error uploading document:', error);
       
       // Remove from in-progress uploads in case of error
       const uploadId = `${file.name}-${file.size}-${Date.now()}`;
       uploadsInProgress.delete(uploadId);
       
-      toast.error('Failed to upload document. Please try again.');
+      // Check if it's a storage limit error
+      if (error.response?.status === 413 && error.response?.data?.error === 'subscription_limit_exceeded') {
+        console.log('Storage limit exceeded:', error.response.data.details);
+        // Don't show toast here, let the component handle it
+      } else {
+        toast.error('Failed to upload document. Please try again.');
+      }
+      
       throw error;
     }
   },
@@ -189,6 +203,50 @@ const documentService = {
       window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
     }, 100);
+  },
+
+  // Check if upload would exceed storage limit
+  checkStorageLimit: async (fileSize: number): Promise<{
+    has_available_storage: boolean;
+    storage_info: {
+      used: number;
+      limit: number;
+      would_be_used: number;
+      plan_name: string;
+    };
+  }> => {
+    try {
+      console.log('Checking storage limit for file size:', fileSize);
+      // Ensure fileSize is a number and properly sent as JSON
+      const response = await api.post('/documents/check-storage', { fileSize: Number(fileSize) });
+      console.log('Storage check response:', response.data);
+      return response.data;
+    } catch (error) {
+      console.error('Error checking storage limit:', error);
+      
+      // Check if this is a user not found error and handle auth issues
+      if (error.response?.status === 404 && error.response?.data?.error === 'user_not_found') {
+        toast.error('Your account information could not be found. Please log in again.');
+        // Force logout
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        window.location.href = '/login';
+        throw error;
+      }
+      
+      // Return a safe default that lets the upload proceed
+      // The server will still check storage when the actual upload happens
+      console.log('Using default storage check result due to error');
+      return {
+        has_available_storage: true, // Optimistically allow the upload
+        storage_info: {
+          used: 0,
+          limit: 5242880, // Default 5MB limit for free tier
+          would_be_used: fileSize,
+          plan_name: 'Unknown'
+        }
+      };
+    }
   }
 };
 
