@@ -1,8 +1,23 @@
 import axios from 'axios';
 import { toast } from 'sonner';
 
-// Force localhost URL regardless of environment variables
-const API_URL = 'http://localhost:8000/api';
+// Get the server's IP address from the current URL
+const getServerIP = () => {
+  // If we're running in development, use the current host
+  if (process.env.NODE_ENV === 'development') {
+    // Get the current hostname and replace it with the server's IP
+    const currentHost = window.location.hostname;
+    if (currentHost === 'localhost' || currentHost === '127.0.0.1') {
+      return '192.168.100.28'; // Your server's IP
+    }
+    return currentHost;
+  }
+  // In production, use the environment variable or fallback to current host
+  return process.env.REACT_APP_SERVER_IP || window.location.hostname;
+};
+
+const SERVER_IP = getServerIP();
+const API_URL = `http://${SERVER_IP}:8000/api`;
 console.log('API URL configured as:', API_URL);
 
 // Function to check if token is expired

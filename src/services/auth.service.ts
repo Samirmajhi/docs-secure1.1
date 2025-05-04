@@ -107,14 +107,8 @@ const authService = {
     localStorage.removeItem('user');
   },
 
-  googleLogin: async (): Promise<void> => {
-    try {
-      // Force localhost URL for Google OAuth
-      window.location.href = 'http://localhost:8000/auth/google';
-    } catch (error) {
-      console.error('Google login error:', error);
-      throw new Error('Failed to initiate Google login');
-    }
+  googleLogin: () => {
+    window.location.href = 'http://localhost:8000/auth/google';
   },
 
   handleGoogleCallback: async (token: string): Promise<AuthResponse> => {

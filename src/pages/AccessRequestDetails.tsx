@@ -60,8 +60,10 @@ const AccessRequestDetails = () => {
         const response = await api.get(`/access/requests/${requestId}`);
         const requestData = response.data;
         
-        // Initialize selected documents with all requested documents
-        const initialSelectedDocs = requestData.documents.map((doc: any) => doc.id);
+        // Initialize selected documents with all requested documents for owners
+        const initialSelectedDocs = requestData.isOwner 
+          ? requestData.documents.map((doc: any) => doc.id)
+          : [];
         
         setRequest(requestData);
         setSelectedDocs(initialSelectedDocs);
@@ -87,57 +89,38 @@ const AccessRequestDetails = () => {
     );
   };
 
-  const handleAction = async (action: 'approve' | 'deny' | 'modify') => {
+  const handleAction = async (action: 'approve' | 'deny') => {
     try {
-      if (!user) {
-        setError('Please log in to process this request');
-        return;
-      }
-
       setProcessing(true);
-      let response;
-
-      if (action === 'modify') {
-        // Show confirmation dialog for modifications
-        const confirmed = window.confirm(
-          'Are you sure you want to modify the requested documents? This will update the scanner\'s access to only the selected documents.'
-        );
-        
-        if (!confirmed) {
-          return;
-        }
-
-        // Check if any documents are selected
-        if (selectedDocs.length === 0) {
-          toast.error('Please select at least one document to grant access to');
-          return;
-        }
-
-        response = await api.post(`/access/requests/${requestId}/modify`, {
-          documentIds: selectedDocs
+      if (action === 'approve') {
+        const response = await api.post(`/access/requests/${requestId}/approve`, {
+          selectedDocuments: selectedDocs
         });
-      } else {
-        response = await api.post(`/access/requests/${requestId}/${action}`);
-      }
-
-      if (response.data.success) {
-        toast.success(
-          action === 'approve' 
-            ? 'Access request approved successfully' 
-            : action === 'deny'
-            ? 'Access request denied successfully'
-            : 'Access request modified successfully'
-        );
         
-        // Redirect to dashboard after 2 seconds
-        setTimeout(() => {
-          navigate('/dashboard');
-        }, 2000);
+        if (response.data.removedDocuments?.length > 0 && !request?.isOwner) {
+          toast.info(
+            <div className="flex flex-col gap-1">
+              <span className="font-semibold text-green-600">Your request has been <span className="text-lg">approved</span></span>
+              <span className="text-sm text-muted-foreground">
+                The following documents were removed from your request: {response.data.removedDocuments.join(', ')}
+              </span>
+            </div>,
+            { duration: 5000 }
+          );
+        }
       } else {
-        setError(response.data.message || 'Failed to process request');
+        await api.post(`/access/requests/${requestId}/deny`);
       }
-    } catch (err: any) {
-      setError(err.response?.data?.message || 'An error occurred while processing your request');
+      
+      // Refresh request details
+      const updatedResponse = await api.get(`/access/requests/${requestId}`);
+      setRequest(updatedResponse.data);
+      
+      toast.success(`Request ${action}d successfully`);
+      navigate('/dashboard');
+    } catch (error: any) {
+      console.error('Error processing request:', error);
+      toast.error(error.response?.data?.message || `Failed to ${action} request`);
     } finally {
       setProcessing(false);
     }
@@ -147,8 +130,7 @@ const AccessRequestDetails = () => {
     const statusConfig = {
       pending: { class: 'bg-yellow-100 text-yellow-800', text: 'Pending' },
       approved: { class: 'bg-green-100 text-green-800', text: 'Approved' },
-      denied: { class: 'bg-red-100 text-red-800', text: 'Denied' },
-      modified: { class: 'bg-blue-100 text-blue-800', text: 'Modified' }
+      denied: { class: 'bg-red-100 text-red-800', text: 'Denied' }
     };
     const config = statusConfig[status as keyof typeof statusConfig] || statusConfig.pending;
     return <Badge variant="outline" className={config.class}>{config.text}</Badge>;
@@ -264,7 +246,9 @@ const AccessRequestDetails = () => {
             {/* Document List */}
             <div className="space-y-4">
               <div className="flex items-center justify-between">
-                <h3 className="text-lg font-semibold">Requested Documents</h3>
+                <h3 className="text-lg font-semibold">
+                  {request.isOwner ? 'Requested Documents' : 'Approved Documents'}
+                </h3>
                 <p className="text-sm text-muted-foreground">
                   {request.documents.length} document{request.documents.length !== 1 ? 's' : ''} selected
                 </p>
@@ -276,7 +260,7 @@ const AccessRequestDetails = () => {
                     key={doc.id} 
                     className="flex items-center p-4 bg-card rounded-xl border shadow-sm hover:shadow-md transition-shadow"
                   >
-                    {request.isOwner && (
+                    {request.isOwner && request.status === 'pending' && (
                       <Checkbox 
                         id={`doc-${doc.id}`}
                         checked={selectedDocs.includes(doc.id)}
@@ -297,11 +281,17 @@ const AccessRequestDetails = () => {
                     </div>
                   </div>
                 ))}
+                {!request.isOwner && request.status !== 'approved' && (
+                  <div className="text-center py-8 text-muted-foreground">
+                    <Info className="w-8 h-8 mx-auto mb-2" />
+                    <p>No documents available. Please wait for the owner to approve your request.</p>
+                  </div>
+                )}
               </div>
             </div>
 
             {/* Action Buttons */}
-            {request.isOwner && (
+            {request.isOwner && request.status === 'pending' && (
               <div className="flex items-center justify-end gap-3 pt-6">
                 <Button
                   variant="outline"
@@ -328,7 +318,7 @@ const AccessRequestDetails = () => {
                       )}
                     </Button>
                   </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="w-48">
+                  <DropdownMenuContent>
                     <DropdownMenuItem 
                       onClick={() => handleAction('approve')}
                       className="flex items-center gap-2 py-2"
@@ -342,13 +332,6 @@ const AccessRequestDetails = () => {
                     >
                       <XCircle className="w-4 h-4 text-red-500" />
                       <span>Deny Request</span>
-                    </DropdownMenuItem>
-                    <DropdownMenuItem 
-                      onClick={() => handleAction('modify')}
-                      className="flex items-center gap-2 py-2"
-                    >
-                      <Edit className="w-4 h-4 text-blue-500" />
-                      <span>Modify Selection</span>
                     </DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>

@@ -150,14 +150,29 @@ const documentService = {
   
   getDocumentForViewing: async (id: string): Promise<{ blob: Blob; contentType: string }> => {
     try {
-      const response = await api.get(`/documents/${id}/download?format=original`, {
-        responseType: 'blob'
+      if (!id) {
+        throw new Error('Document ID is required');
+      }
+
+      const response = await api.get(`/documents/${id}/preview`, {
+        responseType: 'blob',
+        headers: {
+          'Accept': '*/*'
+        }
       });
       
-      const contentType = response.headers['content-type'] || response.data.type || 'application/octet-stream';
+      if (!response.data) {
+        throw new Error('No document data received');
+      }
+
+      // Get content type from response or use a default
+      const contentType = response.headers['content-type'] || 'application/octet-stream';
+      
+      // Create a new blob with the correct type
+      const blob = new Blob([response.data], { type: contentType });
       
       return {
-        blob: response.data,
+        blob,
         contentType
       };
     } catch (error) {
