@@ -30,7 +30,7 @@ export interface AccessRequest {
   qrCodeId: number;
   requesterName: string;
   requesterMobile: string;
-  requestedDocuments: number[];
+  requestedDocuments: string[];
 }
 
 const qrcodeService = {
@@ -150,19 +150,11 @@ const qrcodeService = {
     try {
       console.log('Requesting access with data:', request);
       const response = await api.post('/access/request', request);
-      toast.success('Access request submitted successfully');
+      console.log('Access request response:', response.data);
       return response.data;
     } catch (error: any) {
       console.error('Error requesting access:', error);
-      
-      // Mock success response for demo/testing
-      const accessRequestId = `request-${Date.now()}`;
-      toast.success('Access request submitted successfully (demo)');
-      
-      return {
-        message: 'Access request submitted successfully (demo)',
-        accessRequestId
-      };
+      throw error; // Re-throw the error to be handled by the caller
     }
   },
   

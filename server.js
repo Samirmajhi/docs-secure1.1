@@ -51,8 +51,25 @@ if (process.env.NODE_ENV !== 'production') {
 
 // Initialize express app
 const app = express();
-const PORT = 8000;
-const HOST = 'localhost';
+
+// Get network interfaces
+const networkInterfaces = os.networkInterfaces();
+let localIP = '0.0.0.0';
+
+// Find the first non-internal IPv4 address
+for (const interfaceName of Object.keys(networkInterfaces)) {
+  const networkInterface = networkInterfaces[interfaceName];
+  for (const iface of networkInterface) {
+    if (iface.family === 'IPv4' && !iface.internal) {
+      localIP = iface.address;
+      break;
+    }
+  }
+  if (localIP !== '0.0.0.0') break;
+}
+
+const PORT = process.env.PORT || 8000;
+const HOST = localIP;
 
 // Override any environment variables
 process.env.PORT = PORT;
@@ -176,17 +193,16 @@ const sendEmail = async (to, subject, message, requestId) => {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Middleware
+// Configure CORS
 app.use(cors({
-  origin: [
-    `http://${HOST}:5173`,
-    'http://localhost:5173'
-  ],
-  credentials: true,
+  origin: process.env.NODE_ENV === 'production' 
+    ? process.env.FRONTEND_URL 
+    : ['http://localhost:5173', 'http://192.168.100.28:5173'],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-  exposedHeaders: ['Content-Range', 'X-Content-Range'],
-  maxAge: 600
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+  preflightContinue: false,
+  optionsSuccessStatus: 204
 }));
 
 // Add request logging middleware
@@ -293,7 +309,7 @@ const upload = multer({
 // User Routes
 app.post('/api/auth/register', async (req, res) => {
   try {
-    const { email, password, fullName, mobileNumber, subscriptionId } = req.body;
+    const { email, password, fullName, mobileNumber, pin } = req.body;
     
     // Check if user already exists
     const userExists = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
@@ -303,6 +319,15 @@ app.post('/api/auth/register', async (req, res) => {
     
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
+    
+    // Format mobile number with +977 prefix
+    let formattedMobileNumber = mobileNumber;
+    if (mobileNumber) {
+      // Remove any existing country code
+      formattedMobileNumber = mobileNumber.replace(/^\+?\d{1,3}/, '');
+      // Add +977 prefix
+      formattedMobileNumber = '+977' + formattedMobileNumber;
+    }
     
     // Start a transaction
     const client = await pool.connect();
@@ -322,8 +347,8 @@ app.post('/api/auth/register', async (req, res) => {
 
       // Create user with correct column names
       const userResult = await client.query(
-        'INSERT INTO users (id, email, password_hash, full_name, mobile_number, subscription_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
-        [uuidv4(), email, hashedPassword, fullName, mobileNumber, userSubscriptionId]
+        'INSERT INTO users (id, email, password_hash, full_name, mobile_number, security_pin, subscription_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
+        [uuidv4(), email, hashedPassword, fullName, formattedMobileNumber, pin, userSubscriptionId]
       );
     
       const userId = userResult.rows[0].id;
@@ -343,16 +368,17 @@ app.post('/api/auth/register', async (req, res) => {
         { expiresIn: '24h' }
       );
     
-    res.status(201).json({
-      message: 'User registered successfully',
-      token,
-      user: {
+      res.status(201).json({
+        message: 'User registered successfully',
+        token,
+        user: {
           id: userId,
           email,
           fullName,
-          mobileNumber
-      }
-    });
+          mobileNumber: formattedMobileNumber,
+          pin
+        }
+      });
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
@@ -492,9 +518,18 @@ app.put('/api/user/profile', authenticateToken, async (req, res) => {
     const userId = req.user.id;
     const { fullName, mobileNumber, pin } = req.body;
     
+    // Ensure mobile number has +977 prefix
+    let formattedMobileNumber = mobileNumber;
+    if (mobileNumber) {
+      // Remove any existing country code
+      formattedMobileNumber = mobileNumber.replace(/^\+?\d{1,3}/, '');
+      // Add +977 prefix
+      formattedMobileNumber = '+977' + formattedMobileNumber;
+    }
+    
     const result = await pool.query(
       'UPDATE users SET full_name = $1, mobile_number = $2, security_pin = $3 WHERE id = $4 RETURNING id, email, full_name, mobile_number',
-      [fullName, mobileNumber, pin, userId]
+      [fullName, formattedMobileNumber, pin, userId]
     );
     
     if (result.rows.length === 0) {
@@ -742,10 +777,24 @@ app.put('/api/documents/:id/rename', authenticateToken, async (req, res) => {
 });
 
 // Get document details
-app.get('/api/documents/:id', authenticateToken, async (req, res) => {
+app.get('/api/documents/:id', async (req, res) => {
   try {
     const documentId = req.params.id;
-    const userId = req.user.id;
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    let userId = null;
+    let isOwner = false;
+
+    // If token exists, verify it and get user ID
+    if (token) {
+      try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        userId = decoded.id;
+        isOwner = decoded.isOwner;
+      } catch (err) {
+        console.error('Token verification error:', err);
+      }
+    }
 
     // Get document metadata from database
     const { rows } = await pool.query(
@@ -760,13 +809,14 @@ app.get('/api/documents/:id', authenticateToken, async (req, res) => {
     const document = rows[0];
 
     // Check access permissions
-    if (document.user_id !== userId) {
+    if (document.user_id !== userId && !isOwner) {
+      // If not the owner, check if there's an approved access request
       const accessCheck = await pool.query(
-        `SELECT * FROM access_requests 
-         WHERE document_id = $1 
-         AND requester_id = $2 
-         AND status = 'approved'`,
-        [documentId, userId]
+        `SELECT ar.* FROM access_requests ar
+         JOIN requested_documents rd ON ar.id = rd.access_request_id
+         WHERE rd.document_id = $1 
+         AND ar.status = 'approved'`,
+        [documentId]
       );
 
       if (accessCheck.rows.length === 0) {
@@ -775,12 +825,105 @@ app.get('/api/documents/:id', authenticateToken, async (req, res) => {
     }
 
     // Get signed URL for document
-    const url = await documentStorage.getDocumentUrl(document.user_id, documentId);
+    try {
+      const url = await documentStorage.getDocumentUrl(document.user_id, documentId);
+      
+      if (!url) {
+        throw new Error('Failed to generate document URL');
+      }
 
-    res.json({
-      document,
-      url
-    });
+      res.json({
+        document,
+        url
+      });
+    } catch (error) {
+      console.error('Error generating document URL:', error);
+      return res.status(500).json({ 
+        message: 'Error generating document URL',
+        error: 'url_generation_failed'
+      });
+    }
+  } catch (error) {
+    console.error('Error retrieving document:', error);
+    res.status(500).json({ message: 'Server error while retrieving document' });
+  }
+});
+
+// Add a new endpoint for document preview
+app.get('/api/documents/:id/preview', async (req, res) => {
+  try {
+    const documentId = req.params.id;
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    let userId = null;
+    let isOwner = false;
+
+    // If token exists, verify it and get user ID
+    if (token) {
+      try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        userId = decoded.id;
+        isOwner = decoded.isOwner;
+      } catch (err) {
+        console.error('Token verification error:', err);
+      }
+    }
+
+    // Get document metadata from database
+    const { rows } = await pool.query(
+      'SELECT * FROM documents WHERE id = $1',
+      [documentId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Document not found' });
+    }
+
+    const document = rows[0];
+
+    // Check access permissions
+    if (document.user_id !== userId && !isOwner) {
+      // If not the owner, check if there's an approved access request
+      const accessCheck = await pool.query(
+        `SELECT ar.* FROM access_requests ar
+         JOIN requested_documents rd ON ar.id = rd.access_request_id
+         WHERE rd.document_id = $1 
+         AND ar.status = 'approved'`,
+        [documentId]
+      );
+
+      if (accessCheck.rows.length === 0) {
+        return res.status(403).json({ message: 'Access denied' });
+      }
+    }
+
+    // Get signed URL for document
+    try {
+      const url = await documentStorage.getDocumentUrl(document.user_id, documentId);
+      
+      if (!url) {
+        throw new Error('Failed to generate document URL');
+      }
+
+      // Set appropriate headers for preview
+      res.setHeader('Content-Type', document.type);
+      res.setHeader('Content-Disposition', `inline; filename="${document.name}"`);
+
+      // Stream the file from B2 to the client
+      const response = await axios({
+        method: 'get',
+        url: url,
+        responseType: 'stream'
+      });
+
+      response.data.pipe(res);
+    } catch (error) {
+      console.error('Error generating document URL:', error);
+      return res.status(500).json({ 
+        message: 'Error generating document URL',
+        error: 'url_generation_failed'
+      });
+    }
   } catch (error) {
     console.error('Error retrieving document:', error);
     res.status(500).json({ message: 'Server error while retrieving document' });
@@ -792,14 +935,16 @@ app.post('/api/qrcode/generate', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
     const { accessCode } = req.body;
-    
+    console.log('User ID:', userId);
     // Generate unique code for QR
     const qrUniqueCode = uuidv4();
+    const qrCodeId = uuidv4(); // Generate a unique ID for the QR code record
+    console.log('Generated unique code:', qrUniqueCode);
     
     // Save QR code in database
     const result = await pool.query(
-      'INSERT INTO qr_codes (user_id, code, access_code, is_active, expires_at) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [userId, qrUniqueCode, accessCode || null, true, new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)] // Expires in 30 days
+      'INSERT INTO qr_codes (id,user_id, code, access_code, is_active, expires_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [qrCodeId,userId, qrUniqueCode, accessCode || null, true, new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)] // Expires in 30 days
     );
     
     // Make any previous QR codes inactive
@@ -871,66 +1016,104 @@ app.get('/api/qrcode/validate/:code', async (req, res) => {
 
 app.post('/api/access/request', async (req, res) => {
   try {
-    const { qrCodeId, accessCode, requesterName, requestedDocuments } = req.body;
+    const { qrCodeId, requesterName, requesterMobile, requestedDocuments } = req.body;
     
-    // Validate QR code and access code if required
+    // Validate required fields
+    if (!qrCodeId || !requesterName || !requesterMobile || !requestedDocuments || !Array.isArray(requestedDocuments)) {
+      console.error('Missing required fields:', { qrCodeId, requesterName, requesterMobile, requestedDocuments });
+      return res.status(400).json({ message: 'Missing required fields or invalid format' });
+    }
+
+    // Validate mobile number format
+    const mobileRegex = /^\d{10}$/;
+    if (!mobileRegex.test(requesterMobile)) {
+      return res.status(400).json({ 
+        message: 'Mobile number must be exactly 10 digits',
+        error: 'invalid_mobile_format'
+      });
+    }
+    
+    // Validate QR code
     const qrResult = await pool.query(
       'SELECT qr_codes.*, users.mobile_number, users.email, users.full_name FROM qr_codes JOIN users ON qr_codes.user_id = users.id WHERE qr_codes.id = $1 AND qr_codes.is_active = true AND qr_codes.expires_at > NOW()',
       [qrCodeId]
     );
     
     if (qrResult.rows.length === 0) {
+      console.error('QR code not found or expired:', qrCodeId);
       return res.status(404).json({ message: 'QR code not found, inactive, or expired' });
     }
     
     const qrCode = qrResult.rows[0];
     
     // Check if the requester is trying to access their own documents
-    // We only check if the requester's name matches the QR code owner's name
-    // This allows a registered user to scan other users' QR codes
     if (requesterName === qrCode.full_name) {
+      console.error('Self-access attempt:', { requesterName, ownerName: qrCode.full_name });
       return res.status(400).json({ message: 'You cannot request access to your own documents' });
     }
     
-    // Check access code if required
-    if (qrCode.access_code && qrCode.access_code !== accessCode) {
-      return res.status(401).json({ message: 'Invalid access code' });
+    // Verify that all requested documents belong to the QR code owner
+    const documentsResult = await pool.query(
+      'SELECT id, name FROM documents WHERE id = ANY($1::varchar[]) AND user_id = $2',
+      [requestedDocuments, qrCode.user_id]
+    );
+    
+    if (documentsResult.rows.length !== requestedDocuments.length) {
+      console.error('Document ownership mismatch:', { requested: requestedDocuments.length, found: documentsResult.rows.length });
+      return res.status(400).json({ message: 'One or more requested documents do not belong to the QR code owner' });
     }
     
     // Create access request
     const accessRequestId = uuidv4();
     
-    // Insert document access request
-    await pool.query(
-      'INSERT INTO access_requests (id, qr_code_id, requester_name, status) VALUES ($1, $2, $3, $4)',
-      [accessRequestId, qrCodeId, requesterName, 'pending']
-    );
-    
-    // Add requested documents
-    for (const docId of requestedDocuments) {
-      await pool.query(
-        'INSERT INTO requested_documents (access_request_id, document_id) VALUES ($1, $2)',
-        [accessRequestId, docId]
+    // Start a transaction
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Insert document access request
+      await client.query(
+        'INSERT INTO access_requests (id, qr_code_id, requester_name, requester_mobile, status) VALUES ($1, $2, $3, $4, $5)',
+        [accessRequestId, qrCodeId, requesterName, requesterMobile, 'pending']
       );
-    }
+      
+      // Add requested documents
+      for (const docId of requestedDocuments) {
+        const requestedDocId = uuidv4();
+        await client.query(
+          'INSERT INTO requested_documents (id, access_request_id, document_id) VALUES ($1, $2, $3)',
+          [requestedDocId, accessRequestId, docId]
+        );
+      }
 
-    // Get the names of requested documents
-    const documentsResult = await pool.query(
-      'SELECT name FROM documents WHERE id = ANY($1)',
-      [requestedDocuments]
-    );
-    const documentNames = documentsResult.rows.map(doc => doc.name).join(', ');
+      await client.query('COMMIT');
 
-    // Send email notification to the document owner with HTML interface
-    if (qrCode.email) {
-      const message = `Hello ${qrCode.full_name}, ${requesterName} has requested access to your documents: ${documentNames}.`;
-      await sendEmail(qrCode.email, 'Document Access Request', message, accessRequestId);
+      // Get the names of requested documents
+      const documentNames = documentsResult.rows.map(doc => doc.name).join(', ');
+
+      // Send email notification to the document owner
+      if (qrCode.email) {
+        console.log('Sending email notification to:', qrCode.email);
+        const message = `Hello ${qrCode.full_name}, ${requesterName} has requested access to your documents: ${documentNames}.`;
+        const emailSent = await sendEmail(qrCode.email, 'Document Access Request', message, accessRequestId);
+        if (!emailSent) {
+          console.warn('Failed to send email notification');
+        }
+      } else {
+        console.warn('No email address found for document owner');
+      }
+      
+      res.status(201).json({
+        message: 'Access request submitted successfully',
+        accessRequestId,
+        ownerName: qrCode.full_name
+      });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
     }
-    
-    res.status(201).json({
-      message: 'Access request submitted successfully',
-      accessRequestId
-    });
   } catch (error) {
     console.error('Access request error:', error);
     res.status(500).json({ message: 'Server error during access request' });
@@ -941,27 +1124,61 @@ app.post('/api/access/verify', async (req, res) => {
   try {
     const { mobileNumber, pin } = req.body;
     
-    // Find user with matching mobile and PIN
+    if (!mobileNumber || !pin) {
+      return res.status(400).json({ 
+        message: 'Mobile number and PIN are required',
+        error: 'missing_credentials',
+        shouldReturnToScanner: true
+      });
+    }
+    
+    // Format mobile number for comparison
+    let formattedMobileNumber = mobileNumber;
+    if (mobileNumber) {
+      // Remove any existing country code
+      formattedMobileNumber = mobileNumber.replace(/^\+?\d{1,3}/, '');
+      // Add +977 prefix
+      formattedMobileNumber = '+977' + formattedMobileNumber;
+    }
+    
+    // Try both formats: with +977 and without
     const result = await pool.query(
-      'SELECT * FROM users WHERE mobile_number = $1 AND security_pin = $2',
-      [mobileNumber, pin]
+      'SELECT * FROM users WHERE (mobile_number = $1 OR mobile_number = $2 OR mobile_number = $3) AND security_pin = $4',
+      [formattedMobileNumber, mobileNumber, mobileNumber.replace(/^\+?/, ''), pin]
     );
     
     if (result.rows.length === 0) {
-      return res.status(401).json({ message: 'Invalid mobile number or PIN' });
+      return res.status(401).json({ 
+        message: 'Invalid mobile number or PIN',
+        error: 'invalid_credentials',
+        shouldReturnToScanner: true
+      });
     }
     
     const user = result.rows[0];
     
-    // Get documents owned by the user
+    // Check if user has any documents
     const documents = await pool.query(
       'SELECT * FROM documents WHERE user_id = $1',
       [user.id]
     );
     
-    // Generate token for authenticated owner
+    if (documents.rows.length === 0) {
+      return res.status(404).json({ 
+        message: 'No documents found for this user',
+        error: 'no_documents',
+        shouldReturnToScanner: true
+      });
+    }
+    
+    // Generate token for authenticated owner with shorter expiration
     const token = jwt.sign(
-      { id: user.id, email: user.email, isOwner: true },
+      { 
+        id: user.id, 
+        email: user.email, 
+        isOwner: true,
+        mobileNumber: user.mobile_number
+      },
       JWT_SECRET,
       { expiresIn: '1h' }
     );
@@ -972,13 +1189,18 @@ app.post('/api/access/verify', async (req, res) => {
       user: {
         id: user.id,
         email: user.email,
-        fullName: user.full_name
+        fullName: user.full_name,
+        mobileNumber: user.mobile_number
       },
       documents: documents.rows
     });
   } catch (error) {
     console.error('Owner verification error:', error);
-    res.status(500).json({ message: 'Server error during owner verification' });
+    res.status(500).json({ 
+      message: 'Server error during owner verification',
+      error: 'server_error',
+      shouldReturnToScanner: true
+    });
   }
 });
 
@@ -1015,20 +1237,26 @@ app.get('/api/access/requests/:requestId', async (req, res) => {
       return res.status(404).json({ message: 'Access request not found' });
     }
 
-    // If user is authenticated and is the owner, allow access
-    // If user is not authenticated, still allow access to view the request
+    // If user is authenticated and is the owner, allow access to all documents
+    // If user is not authenticated or not the owner, only show approved documents
+    const isOwner = userId === result.rows[0].owner_id;
+    const isApproved = result.rows[0].status === 'approved';
+
     const request = {
       id: result.rows[0].id,
       requesterName: result.rows[0].requester_name,
+      requesterMobile: result.rows[0].requester_mobile,
       status: result.rows[0].status,
       createdAt: result.rows[0].created_at,
-      isOwner: userId === result.rows[0].owner_id,
-      documents: result.rows.map(row => ({
-        id: row.document_id,
-        name: row.name,
-        type: row.type,
-        size: row.size
-      }))
+      isOwner: isOwner,
+      documents: isOwner || isApproved 
+        ? result.rows.map(row => ({
+            id: row.document_id,
+            name: row.name,
+            type: row.type,
+            size: row.size
+          }))
+        : []
     };
 
     res.json(request);
@@ -1042,6 +1270,7 @@ app.get('/api/access/requests/:requestId', async (req, res) => {
 app.post('/api/access/requests/:requestId/approve', authenticateToken, async (req, res) => {
   try {
     const { requestId } = req.params;
+    const { selectedDocuments } = req.body;
     const userId = req.user.id;
 
     // Verify ownership
@@ -1056,27 +1285,63 @@ app.post('/api/access/requests/:requestId/approve', authenticateToken, async (re
       return res.status(404).json({ message: 'Access request not found or unauthorized' });
     }
 
-    // Update request status
-    await pool.query(
-      'UPDATE access_requests SET status = $1 WHERE id = $2',
-      ['approved', requestId]
-    );
+    // Start a transaction
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
 
-    // Get the approved documents
-    const documentsResult = await pool.query(
-      `SELECT d.* 
-       FROM documents d
-       JOIN requested_documents rd ON d.id = rd.document_id
-       WHERE rd.access_request_id = $1`,
-      [requestId]
-    );
+      // Get all requested documents
+      const requestedDocsResult = await client.query(
+        `SELECT d.id, d.name 
+         FROM documents d
+         JOIN requested_documents rd ON d.id = rd.document_id
+         WHERE rd.access_request_id = $1`,
+        [requestId]
+      );
 
-    // Send success response with documents
-    res.json({
-      success: true,
-      message: 'Access request approved successfully',
-      documents: documentsResult.rows
-    });
+      // Delete documents that were not selected
+      await client.query(
+        `DELETE FROM requested_documents 
+         WHERE access_request_id = $1 
+         AND document_id NOT IN (SELECT unnest($2::varchar[]))`,
+        [requestId, selectedDocuments]
+      );
+
+      // Update request status
+      await client.query(
+        'UPDATE access_requests SET status = $1 WHERE id = $2',
+        ['approved', requestId]
+      );
+
+      await client.query('COMMIT');
+
+      // Get the approved documents
+      const approvedDocsResult = await client.query(
+        `SELECT d.* 
+         FROM documents d
+         JOIN requested_documents rd ON d.id = rd.document_id
+         WHERE rd.access_request_id = $1`,
+        [requestId]
+      );
+
+      // Find removed documents
+      const removedDocuments = requestedDocsResult.rows
+        .filter(doc => !selectedDocuments.includes(doc.id))
+        .map(doc => doc.name);
+
+      // Send success response with documents and removed documents info
+      res.json({
+        success: true,
+        message: 'Access request approved successfully',
+        documents: approvedDocsResult.rows,
+        removedDocuments
+      });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   } catch (error) {
     console.error('Access request approval error:', error);
     res.status(500).json({ message: 'Server error while approving access request' });
@@ -1141,9 +1406,10 @@ app.post('/api/access/requests/:requestId/modify', authenticateToken, async (req
 
     // Add new requested documents
     for (const docId of documentIds) {
+      const requestedDocId = uuidv4();
       await pool.query(
-        'INSERT INTO requested_documents (access_request_id, document_id) VALUES ($1, $2)',
-        [requestId, docId]
+        'INSERT INTO requested_documents (id, access_request_id, document_id) VALUES ($1, $2, $3)',
+        [requestedDocId, requestId, docId]
       );
     }
 
@@ -1195,12 +1461,14 @@ app.get('/api/documents/:id/download', async (req, res) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
     let userId = null;
+    let isOwner = false;
 
     // If token exists, verify it and get user ID
     if (token) {
       try {
         const decoded = jwt.verify(token, JWT_SECRET);
         userId = decoded.id;
+        isOwner = decoded.isOwner;
       } catch (err) {
         console.error('Token verification error:', err);
       }
@@ -1220,7 +1488,7 @@ app.get('/api/documents/:id/download', async (req, res) => {
 
     // If user is authenticated and is the owner, allow access
     // If user is not authenticated, check if they have access through an approved request
-    if (!userId || userId !== document.user_id) {
+    if (!userId || (userId !== document.user_id && !isOwner)) {
       // Check if there's an approved access request for this document
       const accessCheck = await pool.query(
         `SELECT ar.* 
@@ -1286,9 +1554,9 @@ app.get('/metrics', authenticateToken, (req, res) => {
 });
 
 // Google OAuth configuration
-const GOOGLE_CLIENT_ID = '897228285539-k8dt0tjic9bvi2ijbjgn2o5kf77rcdbh.apps.googleusercontent.com';
-const GOOGLE_CLIENT_SECRET = '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';
-const GOOGLE_REDIRECT_URI = 'http://localhost:8000/auth/google/callback';
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '897228285539-k8dt0tjic9bvi2ijbjgn2o5kf77rcdbh.apps.googleusercontent.com';
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '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';
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || 'https://localhost:8000/auth/google/callback';
 
 const oauth2Client = new OAuth2Client(
   GOOGLE_CLIENT_ID,
@@ -1344,10 +1612,10 @@ app.get('/auth/google/callback', async (req, res) => {
 
     if (user.rows.length === 0) {
       console.log('Creating new user...');
-      // Create new user
+      // Create new user with empty mobile number and PIN
       const result = await pool.query(
-        'INSERT INTO users (id, email, full_name, is_google_auth) VALUES ($1, $2, $3, $4) RETURNING *',
-        [uuidv4(), email, name, true]
+        'INSERT INTO users (id, email, full_name, is_google_auth, mobile_number, security_pin) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+        [uuidv4(), email, name, true, null, null]
       );
       user = result;
       console.log('New user created:', user.rows[0]);
@@ -1693,9 +1961,26 @@ const initializeDatabase = async () => {
         id VARCHAR(100) PRIMARY KEY,
         qr_code_id VARCHAR(100) REFERENCES qr_codes(id) ON DELETE CASCADE,
         requester_name VARCHAR(255) NOT NULL,
+        requester_mobile VARCHAR(255) NOT NULL,
         status VARCHAR(50) NOT NULL,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
+
+      -- Add requester_mobile column if it doesn't exist
+      DO $$ 
+      BEGIN
+        BEGIN
+          -- First add the column as nullable
+          ALTER TABLE access_requests ADD COLUMN requester_mobile VARCHAR(255);
+          -- Update existing rows with a default value
+          UPDATE access_requests SET requester_mobile = 'N/A' WHERE requester_mobile IS NULL;
+          -- Now make the column NOT NULL
+          ALTER TABLE access_requests ALTER COLUMN requester_mobile SET NOT NULL;
+        EXCEPTION
+          WHEN duplicate_column THEN 
+            NULL;
+        END;
+      END $$;
 
       -- Create requested documents table if it doesn't exist
       CREATE TABLE IF NOT EXISTS requested_documents (

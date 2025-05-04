@@ -36,21 +36,27 @@ const DocumentViewer = ({
   useEffect(() => {
     const fetchDocument = async () => {
       try {
+        if (!documentId) {
+          throw new Error('Document ID is required');
+        }
+
         setIsLoading(true);
         setError(null);
-        const { blob } = await documentService.getDocumentForViewing(documentId);
+        const { blob, contentType } = await documentService.getDocumentForViewing(documentId);
         
         // Create object URL for the document
         const url = URL.createObjectURL(blob);
         setDocumentUrl(url);
       } catch (err: any) {
+        console.error('Error loading document:', err);
         setError(err.message || 'Failed to load document');
+        toast.error(err.message || 'Failed to load document');
       } finally {
         setIsLoading(false);
       }
     };
 
-    if (isOpen) {
+    if (isOpen && documentId) {
       fetchDocument();
     }
 
@@ -95,22 +101,7 @@ const DocumentViewer = ({
       );
     }
 
-    if (!documentUrl) {
-      return null;
-    }
-
-    // Handle different document types
-    if (documentType.includes('image/')) {
-      return (
-        <div className="flex items-center justify-center h-full">
-          <img 
-            src={documentUrl} 
-            alt={documentName} 
-            className="max-h-full max-w-full object-contain" 
-          />
-        </div>
-      );
-    } else if (documentType.includes('pdf')) {
+    if (documentType.includes('pdf')) {
       return (
         <div className="relative w-full h-full">
           <div className="sticky top-0 right-0 z-10 flex gap-2 bg-white/80 p-2 rounded-md shadow-sm justify-end">
@@ -135,37 +126,25 @@ const DocumentViewer = ({
             </Button>
           </div>
           <div className="w-full h-full overflow-auto">
-            <iframe 
-              src={`${documentUrl}#toolbar=0&navpanes=0&scrollbar=1`}
+            <iframe
+              src={`${documentUrl}#toolbar=0&navpanes=0&scrollbar=1&view=FitH&zoom=${zoom}`}
+              className="w-full h-full"
               title={documentName}
-              className="w-full border-0"
-              style={{ 
-                transform: `scale(${zoom / 100})`,
-                transformOrigin: 'top left',
-                minHeight: '100%',
-                width: `${100 * (100 / zoom)}%`,
-                height: `${100 * (100 / zoom)}%`,
-                overflow: 'auto',
-                display: 'block'
-              }}
-              onError={() => setError('Failed to display PDF')}
             />
           </div>
         </div>
       );
-    } else if (documentType.includes('text/') || documentType.includes('application/json')) {
+    } else if (documentType.includes('image/')) {
       return (
-        <div className="w-full h-full overflow-auto">
-          <iframe 
-            src={documentUrl}
-            title={documentName}
-            className="w-full h-full border-0" 
-            onError={() => setError('Failed to display text content')}
+        <div className="flex items-center justify-center h-full">
+          <img 
+            src={documentUrl || ''} 
+            alt={documentName} 
+            className="max-h-full max-w-full object-contain" 
           />
         </div>
       );
     } else {
-      // For other types, show a generic preview
       return (
         <div className="flex flex-col items-center justify-center h-full p-8">
           <div className="bg-gray-50 p-8 rounded-lg border border-gray-200 w-full max-w-md text-center">
@@ -184,27 +163,13 @@ const DocumentViewer = ({
     }
   };
 
-  const getDocumentIcon = () => {
-    if (documentType.includes('image/')) {
-      return <Image className="h-5 w-5" />;
-    } else if (documentType.includes('pdf')) {
-      return (
-        <svg viewBox="0 0 24 24" className="h-5 w-5 text-red-500">
-          <path fill="currentColor" d="M19,3A2,2 0 0,1 21,5V19A2,2 0 0,1 19,21H5A2,2 0 0,1 3,19V5A2,2 0 0,1 5,3H19M9.5,11.5V6.5H8V18H9.5V13H13V18H14.5V6.5H13V11.5H9.5Z" />
-        </svg>
-      );
-    } else {
-      return <FileText className="h-5 w-5" />;
-    }
-  };
-
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="max-w-4xl h-[90vh] p-0 [&>button]:hidden">
         <DialogHeader className="p-4 border-b">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              {getDocumentIcon()}
+              <FileText className="h-5 w-5" />
               <DialogTitle className="text-lg truncate max-w-[300px]">{documentName}</DialogTitle>
             </div>
             <Button variant="ghost" size="icon" onClick={onClose}>

@@ -52,7 +52,7 @@ import accessService from '@/services/access.service';
 type AuthMode = 'initial' | 'scanner' | 'owner-verify' | 'access-granted';
 
 // Phone number validation regex - Using international format
-const PHONE_REGEX = /^\+?[1-9]\d{1,14}$/;
+const PHONE_REGEX = /^\d{10}$/;
 
 const Access = () => {
   const [searchParams] = useSearchParams();
@@ -126,12 +126,12 @@ const Access = () => {
 
   const validatePhoneNumber = (phone: string) => {
     if (!phone.trim()) {
-      setPhoneError('Phone number is required');
+      setPhoneError('Mobile number is required');
       return false;
     }
     
-    if (!PHONE_REGEX.test(phone.trim())) {
-      setPhoneError('Please enter a valid phone number (e.g., +1234567890)');
+    if (!PHONE_REGEX.test(phone)) {
+      setPhoneError('Mobile number must be exactly 10 digits');
       return false;
     }
     
@@ -161,7 +161,7 @@ const Access = () => {
         qrCodeId: qrData.id,
         requesterName: scannerName,
         requesterMobile: scannerMobile,
-        requestedDocuments: selectedDocs.map(Number)
+        requestedDocuments: selectedDocs
       });
       
       setCurrentRequestId(response.accessRequestId);
@@ -801,14 +801,14 @@ const Access = () => {
       {/* Document Viewer Modal */}
       {viewDocument && (
         <DocumentViewer
-          documentId={Number(viewDocument.id)}
+          documentId={viewDocument.id}
           documentName={viewDocument.name}
           documentType={viewDocument.type}
           documentSize={viewDocument.size}
           dateAdded={viewDocument.dateAdded}
           isOpen={isViewDialogOpen}
           onClose={() => setIsViewDialogOpen(false)}
-          onDownload={() => handleDownload(viewDocument.id.toString(), 'original')}
+          onDownload={() => handleDownload(viewDocument.id, 'original')}
           requestId={currentRequestId || undefined}
         />
       )}
