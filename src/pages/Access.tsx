@@ -71,13 +71,14 @@ const Access = () => {
   const [viewDocument, setViewDocument] = useState<any>(null);
   const [isViewDialogOpen, setIsViewDialogOpen] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
-  const [downloadFormat, setDownloadFormat] = useState('original');
+  const [downloadFormat, setDownloadFormat] = useState("original");
   const [phoneError, setPhoneError] = useState('');
   const [qrValidated, setQrValidated] = useState(false);
   const [requestStatus, setRequestStatus] = useState<'pending' | 'approved' | 'denied' | 'modified' | null>(null);
   const [currentRequestId, setCurrentRequestId] = useState<string | null>(null);
   const [approvedDocuments, setApprovedDocuments] = useState<any[]>([]);
   const [isLoadingDocuments, setIsLoadingDocuments] = useState(false);
+  const [permissionLevel, setPermissionLevel] = useState<string>('view_and_download');
   const navigate = useNavigate();
   
   console.log('QR code from URL:', qrCode);
@@ -183,6 +184,12 @@ const Access = () => {
             clearInterval(pollInterval);
             const docResponse = await accessService.getDocumentAccess(response.accessRequestId);
             setApprovedDocuments(docResponse.documents);
+            
+            // Get and set permission level if available
+            if (docResponse.permissionLevel) {
+              setPermissionLevel(docResponse.permissionLevel);
+            }
+            
             toast.success('Your request has been approved!');
           } else if (statusResponse.status === 'denied') {
             clearInterval(pollInterval);
@@ -238,6 +245,8 @@ const Access = () => {
       setDocuments(response.documents);
       setApprovedDocuments(response.documents);
       setRequestStatus('approved');
+      // Owners always have full access to their documents
+      setPermissionLevel('view_and_download');
       setMode('access-granted');
       
       // Store owner token if needed
@@ -272,6 +281,12 @@ const Access = () => {
 
   const handleDownload = async (documentId: string, format: string) => {
     try {
+      // If user doesn't have download permission, don't allow download
+      if (!hasDownloadPermission) {
+        toast.error('You only have view-only permission for this document');
+        return;
+      }
+      
       setIsDownloading(true);
       const blob = await accessService.downloadDocument(currentRequestId!, documentId, format);
       
@@ -291,9 +306,15 @@ const Access = () => {
       document.body.removeChild(a);
       
       toast.success('Document downloaded successfully');
-    } catch (error) {
+    } catch (error: any) {
       console.error('Download error:', error);
-      toast.error('Failed to download document');
+      
+      // Handle permission denied error specifically
+      if (error.response?.status === 403 && error.response?.data?.permissionLevel === 'view_only') {
+        toast.error('You only have view-only permission for this document');
+      } else {
+        toast.error('Failed to download document');
+      }
     } finally {
       setIsDownloading(false);
     }
@@ -337,6 +358,9 @@ const Access = () => {
       return <div className="w-8 h-8 bg-gray-100 text-gray-500 rounded-full flex items-center justify-center">FILE</div>;
     }
   };
+
+  // Add an access request permission check
+  const hasDownloadPermission = permissionLevel !== 'view_only';
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-background to-muted/30 flex items-center justify-center p-4">
@@ -714,32 +738,34 @@ const Access = () => {
                                       <Eye className="mr-2 h-4 w-4" />
                                       View
                                     </DropdownMenuItem>
-                                    <DropdownMenuSub>
-                                      <DropdownMenuSubTrigger>
-                                        <Download className="mr-2 h-4 w-4" />
-                                        Download
-                                      </DropdownMenuSubTrigger>
-                                      <DropdownMenuSubContent>
-                                        <DropdownMenuRadioGroup value={downloadFormat} onValueChange={setDownloadFormat}>
-                                          <DropdownMenuRadioItem value="original">
-                                            Original Format
-                                          </DropdownMenuRadioItem>
-                                          <DropdownMenuRadioItem value="pdf">
-                                            PDF
-                                          </DropdownMenuRadioItem>
-                                          <DropdownMenuRadioItem value="docx">
-                                            Word (DOCX)
-                                          </DropdownMenuRadioItem>
-                                          <DropdownMenuRadioItem value="txt">
-                                            Text (TXT)
-                                          </DropdownMenuRadioItem>
-                                        </DropdownMenuRadioGroup>
-                                        <DropdownMenuItem onClick={() => handleDownload(doc.id.toString(), downloadFormat)}>
+                                    {hasDownloadPermission && (
+                                      <DropdownMenuSub>
+                                        <DropdownMenuSubTrigger>
                                           <Download className="mr-2 h-4 w-4" />
-                                          Download Now
-                                        </DropdownMenuItem>
-                                      </DropdownMenuSubContent>
-                                    </DropdownMenuSub>
+                                          Download
+                                        </DropdownMenuSubTrigger>
+                                        <DropdownMenuSubContent>
+                                          <DropdownMenuRadioGroup value={downloadFormat} onValueChange={setDownloadFormat}>
+                                            <DropdownMenuRadioItem value="original">
+                                              Original Format
+                                            </DropdownMenuRadioItem>
+                                            <DropdownMenuRadioItem value="pdf">
+                                              PDF
+                                            </DropdownMenuRadioItem>
+                                            <DropdownMenuRadioItem value="docx">
+                                              Word (DOCX)
+                                            </DropdownMenuRadioItem>
+                                            <DropdownMenuRadioItem value="txt">
+                                              Text (TXT)
+                                            </DropdownMenuRadioItem>
+                                          </DropdownMenuRadioGroup>
+                                          <DropdownMenuItem onClick={() => handleDownload(doc.id.toString(), downloadFormat)}>
+                                            <Download className="mr-2 h-4 w-4" />
+                                            Download Now
+                                          </DropdownMenuItem>
+                                        </DropdownMenuSubContent>
+                                      </DropdownMenuSub>
+                                    )}
                                   </DropdownMenuContent>
                                 </DropdownMenu>
                               </div>

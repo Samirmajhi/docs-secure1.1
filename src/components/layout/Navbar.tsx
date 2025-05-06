@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { cn } from '@/lib/utils';
@@ -9,20 +8,22 @@ import {
   LogOut, 
   Menu, 
   X,
-  LayoutDashboard
+  LayoutDashboard,
+  BarChart2
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
+import { NotificationDropdown } from '@/components/notifications/NotificationDropdown';
+import { NotificationProvider } from '@/context/NotificationContext';
+import { useAuth } from '@/context/AuthContext';
 
 const Navbar = () => {
   const [scrolled, setScrolled] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
+  const { isAuthenticated, logout } = useAuth();
   
-  // Mock authentication - in a real app this would come from auth context
-  const isAuthenticated = location.pathname !== '/';
-
   useEffect(() => {
     const handleScroll = () => {
       if (window.scrollY > 10) {
@@ -39,16 +40,14 @@ const Navbar = () => {
   }, []);
 
   const handleLogout = () => {
-    toast.success('Logged out successfully');
-    setTimeout(() => {
-      navigate('/');
-    }, 500);
+    logout();
   };
 
   const navLinks = [
     { name: 'Dashboard', path: '/dashboard', icon: <LayoutDashboard className="h-5 w-5" /> },
     { name: 'Documents', path: '/documents', icon: <FileText className="h-5 w-5" /> },
     { name: 'Share', path: '/share', icon: <Share2 className="h-5 w-5" /> },
+    { name: 'Analytics', path: '/analytics', icon: <BarChart2 className="h-5 w-5" /> },
     { name: 'Profile', path: '/profile', icon: <User className="h-5 w-5" /> },
   ];
 
@@ -83,73 +82,77 @@ const Navbar = () => {
                 key={link.path}
                 to={link.path}
                 className={cn(
-                  'flex items-center gap-2 px-3 py-2 rounded-md transition-colors',
+                  'flex items-center gap-2 text-sm font-medium transition-colors',
                   isActive(link.path)
-                    ? 'text-primary font-medium'
-                    : 'text-muted-foreground hover:text-foreground hover:bg-muted'
+                    ? 'text-primary'
+                    : 'text-muted-foreground hover:text-primary'
                 )}
               >
                 {link.icon}
-                <span>{link.name}</span>
+                {link.name}
               </Link>
             ))}
-            <Button 
-              variant="ghost" 
-              size="icon" 
-              className="text-muted-foreground"
-              onClick={handleLogout}
-            >
-              <LogOut className="h-5 w-5" />
-            </Button>
           </nav>
         )}
 
-        {/* Mobile menu toggle */}
-        <button 
-          className="md:hidden"
-          onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-        >
-          {mobileMenuOpen ? 
-            <X className="h-6 w-6" /> : 
-            <Menu className="h-6 w-6" />
-          }
-        </button>
+        {/* Right side buttons */}
+        <div className="flex items-center gap-4">
+          {isAuthenticated ? (
+            <>
+              <NotificationProvider>
+                <NotificationDropdown />
+              </NotificationProvider>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={handleLogout}
+                className="text-muted-foreground hover:text-primary"
+              >
+                <LogOut className="h-5 w-5" />
+              </Button>
+            </>
+          ) : (
+            <Link to="/">
+              <Button variant="default">Get Started</Button>
+            </Link>
+          )}
+
+          {/* Mobile menu button */}
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+            className="md:hidden"
+          >
+            {mobileMenuOpen ? (
+              <X className="h-5 w-5" />
+            ) : (
+              <Menu className="h-5 w-5" />
+            )}
+          </Button>
+        </div>
       </div>
 
       {/* Mobile Navigation */}
       {mobileMenuOpen && isAuthenticated && (
-        <div className="md:hidden absolute top-full left-0 w-full glass-morphism shadow-md animate-fade-in py-4 bg-white/95 backdrop-blur-md">
-          <nav className="container mx-auto px-4 flex flex-col gap-2">
-            {navLinks.map((link) => (
-              <Link
-                key={link.path}
-                to={link.path}
-                className={cn(
-                  'flex items-center gap-3 px-4 py-3 rounded-md transition-colors',
-                  isActive(link.path)
-                    ? 'text-primary font-medium bg-secondary'
-                    : 'text-muted-foreground hover:text-foreground hover:bg-muted'
-                )}
-                onClick={() => setMobileMenuOpen(false)}
-              >
-                {link.icon}
-                <span>{link.name}</span>
-              </Link>
-            ))}
-            <div className="h-px w-full bg-border my-2" />
-            <Button 
-              variant="ghost" 
-              className="flex items-center gap-3 justify-start px-4 py-3 h-auto text-muted-foreground"
-              onClick={() => {
-                setMobileMenuOpen(false);
-                handleLogout();
-              }}
+        <nav className="md:hidden py-4 px-4 border-t">
+          {navLinks.map((link) => (
+            <Link
+              key={link.path}
+              to={link.path}
+              className={cn(
+                'flex items-center gap-2 py-2 text-sm font-medium transition-colors',
+                isActive(link.path)
+                  ? 'text-primary'
+                  : 'text-muted-foreground hover:text-primary'
+              )}
+              onClick={() => setMobileMenuOpen(false)}
             >
-              <LogOut className="h-5 w-5" />
-              <span>Logout</span>
-            </Button>
-          </nav>
-        </div>
+              {link.icon}
+              {link.name}
+            </Link>
+          ))}
+        </nav>
       )}
     </header>
   );

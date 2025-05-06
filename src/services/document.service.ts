@@ -148,7 +148,7 @@ const documentService = {
     }
   },
   
-  getDocumentForViewing: async (id: string): Promise<{ blob: Blob; contentType: string }> => {
+  getDocumentForViewing: async (id: string): Promise<{ blob: Blob; contentType: string; permissionLevel: string }> => {
     try {
       if (!id) {
         throw new Error('Document ID is required');
@@ -168,16 +168,16 @@ const documentService = {
       // Get content type from response or use a default
       const contentType = response.headers['content-type'] || 'application/octet-stream';
       
-      // Create a new blob with the correct type
-      const blob = new Blob([response.data], { type: contentType });
+      // Get permission level from response headers
+      const permissionLevel = response.headers['x-permission-level'] || 'view_and_download';
       
       return {
-        blob,
-        contentType
+        blob: response.data,
+        contentType,
+        permissionLevel
       };
     } catch (error) {
-      console.error('Error fetching document for viewing:', error);
-      toast.error('Failed to load document for viewing. Please try again.');
+      console.error('Error retrieving document for viewing:', error);
       throw error;
     }
   },

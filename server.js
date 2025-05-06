@@ -26,6 +26,8 @@ import winston from 'winston';
 import { OAuth2Client } from 'google-auth-library';
 import axios from 'axios';
 import crypto from 'crypto';
+import cookieParser from 'cookie-parser';
+import { format } from 'date-fns';
 
 // Load environment variables from .env file
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
@@ -194,16 +196,20 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Configure CORS
-app.use(cors({
-  origin: process.env.NODE_ENV === 'production' 
-    ? process.env.FRONTEND_URL 
-    : ['http://localhost:5173', 'http://192.168.100.28:5173'],
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow any origin to make requests to our API
+    callback(null, true);
+  },
+  credentials: true, // Allow cookies to be sent with requests
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true,
-  preflightContinue: false,
-  optionsSuccessStatus: 204
-}));
+  allowedHeaders: ['Content-Type', 'Authorization', 'Content-Length', 'X-Requested-With']
+};
+
+app.use(cors(corsOptions));
+app.use(express.json()); // Parse JSON request bodies
+app.use(express.urlencoded({ extended: true })); // Parse URL-encoded request bodies
+app.use(cookieParser()); // Parse cookies
 
 // Add request logging middleware
 app.use((req, res, next) => {
@@ -212,9 +218,6 @@ app.use((req, res, next) => {
   console.log('Request Body:', req.body);
   next();
 });
-
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
 
 // Configure PostgreSQL connection
 const pool = new Pool({
@@ -234,8 +237,8 @@ pool.connect((err, client, release) => {
   }
 });
 
-// JWT Secret
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+// JWT Secret - Must match the secret used in the mobile app
+const JWT_SECRET = 'your-secret-key';
 
 // Authentication middleware
 const authenticateToken = (req, res, next) => {
@@ -243,32 +246,24 @@ const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
     
-    console.log(`Authentication attempt for ${req.method} ${req.path}`);
-    
     if (!token) {
-      console.error('Authentication failed: No token provided');
+      console.log('No token provided');
       return res.status(401).json({ 
-        message: 'Authentication token required',
-        error: 'token_missing'
+        message: 'Authentication required',
+        error: 'no_token'
       });
     }
     
     jwt.verify(token, JWT_SECRET, async (err, user) => {
       if (err) {
-        console.error('Authentication failed: Token verification error', err.message);
-        if (err.name === 'TokenExpiredError') {
-          return res.status(401).json({ 
-            message: 'Your session has expired. Please log in again.',
-            error: 'token_expired' 
-          });
-        }
+        console.error('Token verification failed:', err);
         return res.status(403).json({ 
-          message: 'Invalid token. Please log in again.',
-          error: 'token_invalid' 
+          message: 'Invalid or expired token',
+          error: 'invalid_token'
         });
       }
       
-      // Validate that the user exists in the database before proceeding
+      // Verify user still exists in database
       if (user && user.id) {
         try {
           const userCheck = await pool.query('SELECT id FROM users WHERE id = $1', [user.id]);
@@ -333,50 +328,33 @@ app.post('/api/auth/register', async (req, res) => {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-
-      // Get free plan id if no subscription is provided
-      let userSubscriptionId = subscriptionId;
-      if (!userSubscriptionId) {
-        const freePlanResult = await client.query('SELECT id FROM subscription_plans WHERE name = $1', ['Free']);
-        if (freePlanResult.rows.length > 0) {
-          userSubscriptionId = freePlanResult.rows[0].id;
-        } else {
-          throw new Error('Free plan not found');
-        }
-      }
-
-      // Create user with correct column names
-      const userResult = await client.query(
-        'INSERT INTO users (id, email, password_hash, full_name, mobile_number, security_pin, subscription_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
-        [uuidv4(), email, hashedPassword, fullName, formattedMobileNumber, pin, userSubscriptionId]
+      
+      // Insert user with PIN
+      const result = await client.query(
+        'INSERT INTO users (id, email, password, full_name, mobile_number, security_pin) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, email, full_name, mobile_number, security_pin',
+        [uuidv4(), email, hashedPassword, fullName, formattedMobileNumber, pin]
       );
-    
-      const userId = userResult.rows[0].id;
-
-      // Create initial subscription
-      await client.query(
-        'INSERT INTO user_subscriptions (user_id, plan_id, status) VALUES ($1, $2, $3)',
-        [userId, userSubscriptionId, 'active']
-      );
-
-      await client.query('COMMIT');
-
-      // Generate token for immediate login
+      
+      const user = result.rows[0];
+      
+      // Generate JWT token
       const token = jwt.sign(
-        { id: userId, email },
+        { id: user.id, email: user.email },
         JWT_SECRET,
         { expiresIn: '24h' }
       );
-    
-      res.status(201).json({
-        message: 'User registered successfully',
+      
+      await client.query('COMMIT');
+      
+      res.json({
+        message: 'Registration successful',
         token,
         user: {
-          id: userId,
-          email,
-          fullName,
-          mobileNumber: formattedMobileNumber,
-          pin
+          id: user.id,
+          email: user.email,
+          fullName: user.full_name,
+          mobileNumber: user.mobile_number,
+          pin: user.security_pin
         }
       });
     } catch (error) {
@@ -528,7 +506,7 @@ app.put('/api/user/profile', authenticateToken, async (req, res) => {
     }
     
     const result = await pool.query(
-      'UPDATE users SET full_name = $1, mobile_number = $2, security_pin = $3 WHERE id = $4 RETURNING id, email, full_name, mobile_number',
+      'UPDATE users SET full_name = $1, mobile_number = $2, security_pin = $3 WHERE id = $4 RETURNING id, email, full_name, mobile_number, security_pin',
       [fullName, formattedMobileNumber, pin, userId]
     );
     
@@ -544,7 +522,8 @@ app.put('/api/user/profile', authenticateToken, async (req, res) => {
         id: user.id,
         email: user.email,
         fullName: user.full_name,
-        mobileNumber: user.mobile_number
+        mobileNumber: user.mobile_number,
+        pin: user.security_pin
       }
     });
   } catch (error) {
@@ -826,7 +805,7 @@ app.get('/api/documents/:id', async (req, res) => {
 
     // Get signed URL for document
     try {
-      const url = await documentStorage.getDocumentUrl(document.user_id, documentId);
+      const url = await documentStorage.getDocumentUrl(userId, documentId);
       
       if (!url) {
         throw new Error('Failed to generate document URL');
@@ -857,6 +836,7 @@ app.get('/api/documents/:id/preview', async (req, res) => {
     const token = authHeader && authHeader.split(' ')[1];
     let userId = null;
     let isOwner = false;
+    let permissionLevel = null;
 
     // If token exists, verify it and get user ID
     if (token) {
@@ -881,8 +861,10 @@ app.get('/api/documents/:id/preview', async (req, res) => {
 
     const document = rows[0];
 
-    // Check access permissions
-    if (document.user_id !== userId && !isOwner) {
+    // If user is the document owner or has owner permissions
+    if (document.user_id === userId || isOwner) {
+      permissionLevel = 'view_and_download'; // Full access for owners
+    } else {
       // If not the owner, check if there's an approved access request
       const accessCheck = await pool.query(
         `SELECT ar.* FROM access_requests ar
@@ -895,6 +877,9 @@ app.get('/api/documents/:id/preview', async (req, res) => {
       if (accessCheck.rows.length === 0) {
         return res.status(403).json({ message: 'Access denied' });
       }
+      
+      // Get permission level from access request
+      permissionLevel = accessCheck.rows[0].permission_level || 'view_and_download';
     }
 
     // Get signed URL for document
@@ -908,6 +893,7 @@ app.get('/api/documents/:id/preview', async (req, res) => {
       // Set appropriate headers for preview
       res.setHeader('Content-Type', document.type);
       res.setHeader('Content-Disposition', `inline; filename="${document.name}"`);
+      res.setHeader('X-Permission-Level', permissionLevel);
 
       // Stream the file from B2 to the client
       const response = await axios({
@@ -976,41 +962,43 @@ app.post('/api/qrcode/generate', authenticateToken, async (req, res) => {
   }
 });
 
+// QR Code validation endpoint
 app.get('/api/qrcode/validate/:code', async (req, res) => {
   try {
     const { code } = req.params;
+    console.log('Validating QR code:', code);
     
-    // Check if QR code exists and is active
-    const result = await pool.query(
-      'SELECT qr_codes.*, users.full_name FROM qr_codes JOIN users ON qr_codes.user_id = users.id WHERE qr_codes.code = $1 AND qr_codes.is_active = true AND qr_codes.expires_at > NOW()',
+    // Find the QR code
+    const qrResult = await pool.query(
+      'SELECT qr.*, u.full_name as owner_name FROM qr_codes qr JOIN users u ON qr.user_id = u.id WHERE qr.code = $1 AND qr.is_active = true',
       [code]
     );
     
-    if (result.rows.length === 0) {
-      return res.status(404).json({ message: 'QR code not found, inactive, or expired' });
+    if (qrResult.rows.length === 0) {
+      return res.status(404).json({ message: 'Invalid or expired QR code' });
     }
     
-    const qrCode = result.rows[0];
+    const qrCode = qrResult.rows[0];
     
-    // Get documents of the QR code owner
-    const documents = await pool.query(
+    // Get documents for this QR code
+    const docsResult = await pool.query(
       'SELECT id, name, type, size, created_at FROM documents WHERE user_id = $1',
       [qrCode.user_id]
     );
     
     res.json({
-      message: 'QR code is valid',
+      message: 'QR code validated successfully',
       qrCode: {
         id: qrCode.id,
         ownerId: qrCode.user_id,
-        ownerName: qrCode.full_name,
-        hasAccessCode: !!qrCode.access_code,
-        documents: documents.rows
+        ownerName: qrCode.owner_name,
+        hasAccessCode: qrCode.access_code !== null,
+        documents: docsResult.rows
       }
     });
   } catch (error) {
-    console.error('QR code validation error:', error);
-    res.status(500).json({ message: 'Server error during QR code validation' });
+    console.error('Error validating QR code:', error);
+    res.status(500).json({ message: 'Failed to validate QR code' });
   }
 });
 
@@ -1122,9 +1110,11 @@ app.post('/api/access/request', async (req, res) => {
 
 app.post('/api/access/verify', async (req, res) => {
   try {
+    console.log('Owner verification request body:', req.body);
     const { mobileNumber, pin } = req.body;
     
     if (!mobileNumber || !pin) {
+      console.log('Missing credentials in owner verification:', { mobileNumber: !!mobileNumber, pin: !!pin });
       return res.status(400).json({ 
         message: 'Mobile number and PIN are required',
         error: 'missing_credentials',
@@ -1141,6 +1131,8 @@ app.post('/api/access/verify', async (req, res) => {
       formattedMobileNumber = '+977' + formattedMobileNumber;
     }
     
+    console.log('Looking for user with mobile numbers:', { formattedMobileNumber, original: mobileNumber, withoutPlus: mobileNumber.replace(/^\+?/, '') });
+    
     // Try both formats: with +977 and without
     const result = await pool.query(
       'SELECT * FROM users WHERE (mobile_number = $1 OR mobile_number = $2 OR mobile_number = $3) AND security_pin = $4',
@@ -1148,6 +1140,7 @@ app.post('/api/access/verify', async (req, res) => {
     );
     
     if (result.rows.length === 0) {
+      console.log('Invalid credentials during owner verification');
       return res.status(401).json({ 
         message: 'Invalid mobile number or PIN',
         error: 'invalid_credentials',
@@ -1156,6 +1149,7 @@ app.post('/api/access/verify', async (req, res) => {
     }
     
     const user = result.rows[0];
+    console.log('Owner verified successfully:', { userId: user.id });
     
     // Check if user has any documents
     const documents = await pool.query(
@@ -1164,6 +1158,7 @@ app.post('/api/access/verify', async (req, res) => {
     );
     
     if (documents.rows.length === 0) {
+      console.log('No documents found for verified owner:', { userId: user.id });
       return res.status(404).json({ 
         message: 'No documents found for this user',
         error: 'no_documents',
@@ -1182,6 +1177,8 @@ app.post('/api/access/verify', async (req, res) => {
       JWT_SECRET,
       { expiresIn: '1h' }
     );
+    
+    console.log('Owner verification successful, returning documents:', { count: documents.rows.length });
     
     res.json({
       message: 'Owner verification successful',
@@ -1270,12 +1267,15 @@ app.get('/api/access/requests/:requestId', async (req, res) => {
 app.post('/api/access/requests/:requestId/approve', authenticateToken, async (req, res) => {
   try {
     const { requestId } = req.params;
-    const { selectedDocuments } = req.body;
+    const { selectedDocuments, permissionLevel } = req.body;
     const userId = req.user.id;
 
+    // Default permission level is 'view_and_download' if not specified
+    const accessPermission = permissionLevel || 'view_and_download';
+    
     // Verify ownership
     const checkResult = await pool.query(
-      `SELECT ar.* FROM access_requests ar
+      `SELECT ar.*, qr.user_id as owner_id FROM access_requests ar
        JOIN qr_codes qr ON ar.qr_code_id = qr.id
        WHERE ar.id = $1 AND qr.user_id = $2`,
       [requestId, userId]
@@ -1307,10 +1307,10 @@ app.post('/api/access/requests/:requestId/approve', authenticateToken, async (re
         [requestId, selectedDocuments]
       );
 
-      // Update request status
+      // Update request status and permission level
       await client.query(
-        'UPDATE access_requests SET status = $1 WHERE id = $2',
-        ['approved', requestId]
+        'UPDATE access_requests SET status = $1, permission_level = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3',
+        ['approved', accessPermission, requestId]
       );
 
       await client.query('COMMIT');
@@ -1333,6 +1333,7 @@ app.post('/api/access/requests/:requestId/approve', authenticateToken, async (re
       res.json({
         success: true,
         message: 'Access request approved successfully',
+        permissionLevel: accessPermission,
         documents: approvedDocsResult.rows,
         removedDocuments
       });
@@ -1368,7 +1369,7 @@ app.post('/api/access/requests/:requestId/deny', authenticateToken, async (req, 
 
     // Update request status
     await pool.query(
-      'UPDATE access_requests SET status = $1 WHERE id = $2',
+      'UPDATE access_requests SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
       ['denied', requestId]
     );
 
@@ -1435,6 +1436,9 @@ app.get('/api/access/requests/:requestId/documents', async (req, res) => {
       return res.status(404).json({ message: 'Access request not found or not approved' });
     }
 
+    // Get the request's permission level
+    const permissionLevel = requestResult.rows[0].permission_level || 'view_and_download';
+
     // Get the approved documents
     const documentsResult = await pool.query(
       `SELECT d.* 
@@ -1445,7 +1449,8 @@ app.get('/api/access/requests/:requestId/documents', async (req, res) => {
     );
 
     res.json({
-      documents: documentsResult.rows
+      documents: documentsResult.rows,
+      permissionLevel: permissionLevel
     });
   } catch (error) {
     console.error('Error fetching approved documents:', error);
@@ -1489,7 +1494,7 @@ app.get('/api/documents/:id/download', async (req, res) => {
     // If user is authenticated and is the owner, allow access
     // If user is not authenticated, check if they have access through an approved request
     if (!userId || (userId !== document.user_id && !isOwner)) {
-      // Check if there's an approved access request for this document
+      // Check if there's an approved access request for this document with appropriate permissions
       const accessCheck = await pool.query(
         `SELECT ar.* 
          FROM access_requests ar
@@ -1500,6 +1505,15 @@ app.get('/api/documents/:id/download', async (req, res) => {
 
       if (accessCheck.rows.length === 0) {
         return res.status(403).json({ message: 'You do not have permission to download this document' });
+      }
+      
+      // Check if the user has download permission
+      if (accessCheck.rows[0].permission_level === 'view_only') {
+        return res.status(403).json({ 
+          message: 'Your access level is view-only. Downloading is not allowed.',
+          error: 'permission_denied',
+          permissionLevel: 'view_only'
+        });
       }
     }
 
@@ -1880,118 +1894,96 @@ const documentStorage = new DocumentStorageManager();
 // Drop and recreate all tables on server start
 const initializeDatabase = async () => {
   try {
-    // Create tables if they don't exist (instead of dropping and recreating)
+    // Create users table
     await pool.query(`
-      -- First create subscription_plans table if it doesn't exist
-      CREATE TABLE IF NOT EXISTS subscription_plans (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(50) UNIQUE NOT NULL,
-        storage_limit BIGINT NOT NULL,
-        price DECIMAL(10,2),
-        features JSONB,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-
-      -- Insert default subscription plans if they don't exist
-      INSERT INTO subscription_plans (name, storage_limit, price, features) 
-      VALUES 
-        ('Free', 5242880, 0, '{"features": ["Basic document upload", "Unlimited QR codes", "Standard security", "Community support"]}'),
-        ('Pro', 15728640, 9.99, '{"features": ["Advanced document management", "Unlimited QR codes", "Priority support", "Document versioning", "Custom expiration"]}'),
-        ('Enterprise', 0, null, '{"features": ["Custom storage limit", "Team management", "API access", "Custom integrations", "Dedicated support"]}')
-      ON CONFLICT (name) DO NOTHING;
-
-      -- Create users table if it doesn't exist
       CREATE TABLE IF NOT EXISTS users (
-        id VARCHAR(100) PRIMARY KEY,
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         email VARCHAR(255) UNIQUE NOT NULL,
-        password_hash VARCHAR(255),
+        password_hash VARCHAR(255) NOT NULL,
         full_name VARCHAR(255),
-        mobile_number VARCHAR(50),
-        security_pin VARCHAR(6),
-        is_google_auth BOOLEAN DEFAULT false,
-        subscription_id INTEGER REFERENCES subscription_plans(id),
-        storage_used BIGINT DEFAULT 0,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        CONSTRAINT auth_check CHECK (
-          (password_hash IS NOT NULL) OR 
-          (is_google_auth = true)
-        )
-      );
-
-      -- Create user subscriptions table if it doesn't exist
-      CREATE TABLE IF NOT EXISTS user_subscriptions (
-        id SERIAL PRIMARY KEY,
-        user_id VARCHAR(100) REFERENCES users(id),
-        plan_id INTEGER REFERENCES subscription_plans(id),
-        storage_used BIGINT DEFAULT 0,
-        status VARCHAR(20) DEFAULT 'active',
-        start_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        end_date TIMESTAMP,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-
-      -- Create documents table if it doesn't exist
-      CREATE TABLE IF NOT EXISTS documents (
-        id VARCHAR(100) PRIMARY KEY,
-        user_id VARCHAR(100) REFERENCES users(id) ON DELETE CASCADE,
-        name VARCHAR(255) NOT NULL,
-        type VARCHAR(100) NOT NULL,
-        size INTEGER NOT NULL,
-        file_path VARCHAR(500) NOT NULL,
-        file_id VARCHAR(100),
-        metadata JSONB,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-
-      -- Create QR codes table if it doesn't exist
-      CREATE TABLE IF NOT EXISTS qr_codes (
-        id VARCHAR(100) PRIMARY KEY,
-        user_id VARCHAR(100) REFERENCES users(id) ON DELETE CASCADE,
-        code VARCHAR(100) UNIQUE NOT NULL,
-        access_code VARCHAR(50),
-        is_active BOOLEAN DEFAULT true,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        expires_at TIMESTAMP WITH TIME ZONE
-      );
-
-      -- Create access requests table if it doesn't exist
-      CREATE TABLE IF NOT EXISTS access_requests (
-        id VARCHAR(100) PRIMARY KEY,
-        qr_code_id VARCHAR(100) REFERENCES qr_codes(id) ON DELETE CASCADE,
-        requester_name VARCHAR(255) NOT NULL,
-        requester_mobile VARCHAR(255) NOT NULL,
-        status VARCHAR(50) NOT NULL,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-
-      -- Add requester_mobile column if it doesn't exist
-      DO $$ 
-      BEGIN
-        BEGIN
-          -- First add the column as nullable
-          ALTER TABLE access_requests ADD COLUMN requester_mobile VARCHAR(255);
-          -- Update existing rows with a default value
-          UPDATE access_requests SET requester_mobile = 'N/A' WHERE requester_mobile IS NULL;
-          -- Now make the column NOT NULL
-          ALTER TABLE access_requests ALTER COLUMN requester_mobile SET NOT NULL;
-        EXCEPTION
-          WHEN duplicate_column THEN 
-            NULL;
-        END;
-      END $$;
-
-      -- Create requested documents table if it doesn't exist
-      CREATE TABLE IF NOT EXISTS requested_documents (
-        id VARCHAR(100) PRIMARY KEY,
-        access_request_id VARCHAR(100) REFERENCES access_requests(id) ON DELETE CASCADE,
-        document_id VARCHAR(100) REFERENCES documents(id) ON DELETE CASCADE,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
+      )
     `);
 
-    console.log('Database tables created or verified successfully');
+    // Create documents table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS documents (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        owner_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        title VARCHAR(255) NOT NULL,
+        description TEXT,
+        file_path VARCHAR(255) NOT NULL,
+        file_type VARCHAR(50),
+        file_size INTEGER,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    // Create QR codes table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS qr_codes (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        code VARCHAR(255) UNIQUE NOT NULL,
+        access_code VARCHAR(255),
+        is_active BOOLEAN DEFAULT true,
+        expires_at TIMESTAMP WITH TIME ZONE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create access_requests table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS access_requests (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        qr_code_id UUID REFERENCES qr_codes(id) ON DELETE CASCADE,
+        requester_name VARCHAR(255) NOT NULL,
+        requester_mobile VARCHAR(255) NOT NULL,
+        status VARCHAR(20) DEFAULT 'pending',
+        permission_level VARCHAR(50) DEFAULT 'view_and_download',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    // Create requested_documents table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS requested_documents (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        access_request_id UUID REFERENCES access_requests(id) ON DELETE CASCADE,
+        document_id UUID REFERENCES documents(id) ON DELETE CASCADE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create document_scans table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS document_scans (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        document_id VARCHAR(255) REFERENCES documents(id) ON DELETE CASCADE,
+        scanned_by VARCHAR(255) REFERENCES users(id) ON DELETE SET NULL,
+        scan_type VARCHAR(50) NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create notifications table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS notifications (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id VARCHAR(255) REFERENCES users(id) ON DELETE CASCADE,
+        type VARCHAR(50) NOT NULL,
+        message TEXT NOT NULL,
+        data JSONB,
+        read BOOLEAN DEFAULT false,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    console.log('Database tables initialized successfully');
   } catch (error) {
     console.error('Error initializing database:', error);
     throw error;
@@ -2316,5 +2308,756 @@ app.post('/api/documents/check-storage', authenticateToken, async (req, res) => 
       error: 'server_error',
       details: error.message
     });
+  }
+});
+
+// Analytics endpoints
+app.get('/api/analytics', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { startDate, endDate } = req.query;
+    
+    // Create a safe format for the date values
+    const formattedStartDate = startDate ? `'${startDate}'::timestamp` : null;
+    const formattedEndDate = endDate ? `'${endDate}'::timestamp` : null;
+    
+    // Build date filter clause
+    let dateFilter = '';
+    if (formattedStartDate && formattedEndDate) {
+      dateFilter = ` AND ar.created_at BETWEEN ${formattedStartDate} AND ${formattedEndDate}`;
+    } else if (formattedStartDate) {
+      dateFilter = ` AND ar.created_at >= ${formattedStartDate}`;
+    } else if (formattedEndDate) {
+      dateFilter = ` AND ar.created_at <= ${formattedEndDate}`;
+    }
+    
+    // Same filter but for document scans
+    let scanDateFilter = '';
+    if (formattedStartDate && formattedEndDate) {
+      scanDateFilter = ` AND ds.created_at BETWEEN ${formattedStartDate} AND ${formattedEndDate}`;
+    } else if (formattedStartDate) {
+      scanDateFilter = ` AND ds.created_at >= ${formattedStartDate}`;
+    } else if (formattedEndDate) {
+      scanDateFilter = ` AND ds.created_at <= ${formattedEndDate}`;
+    }
+
+    // Get total access requests
+    const totalRequestsSQL = `
+      SELECT COUNT(*) 
+      FROM access_requests ar 
+      JOIN qr_codes qr ON ar.qr_code_id = qr.id 
+      WHERE qr.user_id = $1${dateFilter}
+    `;
+    const totalRequestsResult = await pool.query(totalRequestsSQL, [userId]);
+    const totalRequests = parseInt(totalRequestsResult.rows[0].count);
+
+    // Get approved requests
+    const approvedRequestsSQL = `
+      SELECT COUNT(*) 
+      FROM access_requests ar 
+      JOIN qr_codes qr ON ar.qr_code_id = qr.id 
+      WHERE qr.user_id = $1 AND ar.status = 'approved'${dateFilter}
+    `;
+    const approvedRequestsResult = await pool.query(approvedRequestsSQL, [userId]);
+    const approvedRequests = parseInt(approvedRequestsResult.rows[0].count);
+
+    // Get total document scans
+    const totalScansSQL = `
+      SELECT COUNT(*) 
+      FROM document_scans ds 
+      JOIN documents d ON ds.document_id = d.id 
+      WHERE d.user_id = $1${scanDateFilter}
+    `;
+    const totalScansResult = await pool.query(totalScansSQL, [userId]);
+    const totalScans = parseInt(totalScansResult.rows[0].count);
+
+    // Get requests over time
+    const requestsOverTimeSQL = `
+      SELECT DATE(ar.created_at) as date, COUNT(*) as count 
+      FROM access_requests ar 
+      JOIN qr_codes qr ON ar.qr_code_id = qr.id 
+      WHERE qr.user_id = $1 
+      ${dateFilter || ' AND ar.created_at >= NOW() - INTERVAL \'30 days\''}
+      GROUP BY DATE(ar.created_at)
+      ORDER BY date
+    `;
+    const requestsOverTimeResult = await pool.query(requestsOverTimeSQL, [userId]);
+
+    // Get request status distribution
+    const requestStatusSQL = `
+      SELECT ar.status, COUNT(*) as count 
+      FROM access_requests ar 
+      JOIN qr_codes qr ON ar.qr_code_id = qr.id 
+      WHERE qr.user_id = $1${dateFilter}
+      GROUP BY ar.status
+    `;
+    const requestStatusResult = await pool.query(requestStatusSQL, [userId]);
+
+    // Get scans over time
+    const scansOverTimeSQL = `
+      SELECT DATE(ds.created_at) as date, COUNT(*) as count 
+      FROM document_scans ds 
+      JOIN documents d ON ds.document_id = d.id 
+      WHERE d.user_id = $1 
+      ${scanDateFilter || ' AND ds.created_at >= NOW() - INTERVAL \'30 days\''}
+      GROUP BY DATE(ds.created_at)
+      ORDER BY date
+    `;
+    const scansOverTimeResult = await pool.query(scansOverTimeSQL, [userId]);
+
+    res.json({
+      totalRequests,
+      approvedRequests,
+      totalScans,
+      requestsOverTime: requestsOverTimeResult.rows,
+      requestStatus: requestStatusResult.rows,
+      scansOverTime: scansOverTimeResult.rows
+    });
+  } catch (error) {
+    console.error('Error fetching analytics:', error);
+    res.status(500).json({ message: 'Error fetching analytics data' });
+  }
+});
+
+// Get latest access requests
+app.get('/api/access-requests/latest', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { page = 1, limit = 10, startDate, endDate, status } = req.query;
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+    
+    // Create a safe format for the date values
+    const formattedStartDate = startDate ? `'${startDate}'::timestamp` : null;
+    const formattedEndDate = endDate ? `'${endDate}'::timestamp` : null;
+    
+    // Build filter conditions string directly
+    let filterConditions = `WHERE qr.user_id = $1`;
+    
+    // Date filters using direct string replacement
+    if (formattedStartDate && formattedEndDate) {
+      filterConditions += ` AND ar.created_at BETWEEN ${formattedStartDate} AND ${formattedEndDate}`;
+    } else if (formattedStartDate) {
+      filterConditions += ` AND ar.created_at >= ${formattedStartDate}`;
+    } else if (formattedEndDate) {
+      filterConditions += ` AND ar.created_at <= ${formattedEndDate}`;
+    }
+    
+    // Status filter
+    let statusFilter = '';
+    if (status && ['pending', 'approved', 'denied'].includes(status)) {
+      statusFilter = ` AND ar.status = '${status}'`;
+      filterConditions += statusFilter;
+    }
+    
+    // Get total count for pagination
+    const countSQL = `
+      SELECT COUNT(DISTINCT ar.id) 
+      FROM access_requests ar
+      JOIN qr_codes qr ON ar.qr_code_id = qr.id
+      ${filterConditions}
+    `;
+    
+    const countResult = await pool.query(countSQL, [userId]);
+    const total = parseInt(countResult.rows[0].count);
+    
+    // Get access requests with document counts - using $2 and $3 for pagination
+    const requestsSQL = `
+      SELECT 
+        ar.id, 
+        ar.requester_name as "requesterName", 
+        ar.requester_mobile as "requesterMobile", 
+        ar.status, 
+        ar.permission_level as "permissionLevel",
+        ar.created_at as "createdAt",
+        (
+          SELECT COUNT(*) 
+          FROM requested_documents rd 
+          WHERE rd.access_request_id = ar.id
+        ) as "documentsCount"
+      FROM access_requests ar
+      JOIN qr_codes qr ON ar.qr_code_id = qr.id
+      ${filterConditions}
+      ORDER BY ar.created_at DESC
+      LIMIT $2 OFFSET $3
+    `;
+    
+    const requestsResult = await pool.query(requestsSQL, [userId, parseInt(limit), offset]);
+    
+    res.json({
+      requests: requestsResult.rows,
+      total,
+      page: parseInt(page),
+      limit: parseInt(limit)
+    });
+    
+  } catch (error) {
+    console.error('Error fetching access requests:', error);
+    res.status(500).json({ message: 'Error fetching access requests' });
+  }
+});
+
+// Export analytics data
+app.get('/api/analytics/export', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { format = 'csv', startDate, endDate } = req.query;
+    
+    // Create a safe format for the date values
+    const formattedStartDate = startDate ? `'${startDate}'::timestamp` : null;
+    const formattedEndDate = endDate ? `'${endDate}'::timestamp` : null;
+    
+    // Build date filter clause
+    let dateFilter = '';
+    if (formattedStartDate && formattedEndDate) {
+      dateFilter = ` AND ar.created_at BETWEEN ${formattedStartDate} AND ${formattedEndDate}`;
+    } else if (formattedStartDate) {
+      dateFilter = ` AND ar.created_at >= ${formattedStartDate}`;
+    } else if (formattedEndDate) {
+      dateFilter = ` AND ar.created_at <= ${formattedEndDate}`;
+    }
+    
+    // Get access requests
+    const requestsSQL = `
+      SELECT 
+        ar.id, 
+        ar.requester_name as "Requester Name", 
+        ar.requester_mobile as "Contact", 
+        ar.status as "Status", 
+        TO_CHAR(ar.created_at, 'YYYY-MM-DD HH24:MI:SS') as "Date Created",
+        (
+          SELECT COUNT(*) 
+          FROM requested_documents rd 
+          WHERE rd.access_request_id = ar.id
+        ) as "Documents Count"
+      FROM access_requests ar
+      JOIN qr_codes qr ON ar.qr_code_id = qr.id
+      WHERE qr.user_id = $1${dateFilter}
+      ORDER BY ar.created_at DESC
+    `;
+    
+    const requestsResult = await pool.query(requestsSQL, [userId]);
+    
+    // Handle different export formats
+    if (format === 'csv') {
+      // Convert to CSV
+      if (requestsResult.rows.length === 0) {
+        return res.status(404).json({ message: 'No data to export' });
+      }
+      
+      const headers = Object.keys(requestsResult.rows[0]).join(',');
+      const rows = requestsResult.rows.map(row => 
+        Object.values(row).map(value => 
+          typeof value === 'string' ? `"${value.replace(/"/g, '""')}"` : value
+        ).join(',')
+      ).join('\n');
+      
+      const csv = `${headers}\n${rows}`;
+      
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename=analytics-export.csv');
+      res.send(csv);
+    } 
+    else if (format === 'excel') {
+      // For simplicity, just sending CSV with Excel content type
+      if (requestsResult.rows.length === 0) {
+        return res.status(404).json({ message: 'No data to export' });
+      }
+      
+      const headers = Object.keys(requestsResult.rows[0]).join(',');
+      const rows = requestsResult.rows.map(row => 
+        Object.values(row).map(value => 
+          typeof value === 'string' ? `"${value.replace(/"/g, '""')}"` : value
+        ).join(',')
+      ).join('\n');
+      
+      const csv = `${headers}\n${rows}`;
+      
+      res.setHeader('Content-Type', 'application/vnd.ms-excel');
+      res.setHeader('Content-Disposition', 'attachment; filename=analytics-export.xls');
+      res.send(csv);
+    }
+    else if (format === 'pdf') {
+      // Sending JSON with PDF content type - in a real app, you'd use a PDF library
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', 'attachment; filename=analytics-export.pdf');
+      res.json({ message: 'PDF export not fully implemented yet', data: requestsResult.rows });
+    }
+    else {
+      res.status(400).json({ message: 'Unsupported export format' });
+    }
+  } catch (error) {
+    console.error('Error exporting analytics data:', error);
+    res.status(500).json({ message: 'Error exporting analytics data' });
+  }
+});
+
+// Document access endpoint
+app.get('/api/documents/:documentId/access', authenticateToken, async (req, res) => {
+  try {
+    const { documentId } = req.params;
+    const userId = req.user.id;
+
+    // Check if user has access to the document
+    const accessResult = await pool.query(
+      `SELECT d.*, ar.id as request_id 
+       FROM documents d 
+       LEFT JOIN access_requests ar ON d.id = ar.document_id 
+       WHERE d.id = $1 
+       AND (d.owner_id = $2 OR (ar.requester_id = $2 AND ar.status = 'approved'))`,
+      [documentId, userId]
+    );
+
+    if (accessResult.rows.length === 0) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    // Record the document scan
+    await pool.query(
+      `INSERT INTO document_scans (document_id, scanned_by, scan_type) 
+       VALUES ($1, $2, $3)`,
+      [documentId, userId, 'view']
+    );
+
+    // Get document URL
+    const documentUrl = await documentStorageManager.getDocumentUrl(userId, documentId);
+    res.json({ url: documentUrl });
+  } catch (error) {
+    console.error('Error accessing document:', error);
+    res.status(500).json({ message: 'Error accessing document' });
+  }
+});
+
+// Access request approval endpoint
+app.post('/api/access-requests/:requestId/approve', authenticateToken, async (req, res) => {
+  try {
+    const { requestId } = req.params;
+    const { selectedDocuments, permissionLevel } = req.body;
+    const userId = req.user.id;
+
+    // Default permission level is 'view_and_download' if not specified
+    const accessPermission = permissionLevel || 'view_and_download';
+    
+    // Verify ownership
+    const checkResult = await pool.query(
+      `SELECT ar.*, qr.user_id as owner_id FROM access_requests ar
+       JOIN qr_codes qr ON ar.qr_code_id = qr.id
+       WHERE ar.id = $1 AND qr.user_id = $2`,
+      [requestId, userId]
+    );
+
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({ message: 'Access request not found or unauthorized' });
+    }
+
+    // Start a transaction
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Get all requested documents
+      const requestedDocsResult = await client.query(
+        `SELECT d.id, d.name 
+         FROM documents d
+         JOIN requested_documents rd ON d.id = rd.document_id
+         WHERE rd.access_request_id = $1`,
+        [requestId]
+      );
+
+      // Delete documents that were not selected
+      await client.query(
+        `DELETE FROM requested_documents 
+         WHERE access_request_id = $1 
+         AND document_id NOT IN (SELECT unnest($2::varchar[]))`,
+        [requestId, selectedDocuments]
+      );
+
+      // Update request status and permission level
+      await client.query(
+        'UPDATE access_requests SET status = $1, permission_level = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3',
+        ['approved', accessPermission, requestId]
+      );
+
+      await client.query('COMMIT');
+
+      // Get the approved documents
+      const approvedDocsResult = await client.query(
+        `SELECT d.* 
+         FROM documents d
+         JOIN requested_documents rd ON d.id = rd.document_id
+         WHERE rd.access_request_id = $1`,
+        [requestId]
+      );
+
+      // Find removed documents
+      const removedDocuments = requestedDocsResult.rows
+        .filter(doc => !selectedDocuments.includes(doc.id))
+        .map(doc => doc.name);
+
+      // Send success response with documents and removed documents info
+      res.json({
+        success: true,
+        message: 'Access request approved successfully',
+        permissionLevel: accessPermission,
+        documents: approvedDocsResult.rows,
+        removedDocuments
+      });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Access request approval error:', error);
+    res.status(500).json({ message: 'Server error while approving access request' });
+  }
+});
+
+// Access request denial endpoint
+app.post('/api/access-requests/:requestId/deny', authenticateToken, async (req, res) => {
+  try {
+    const { requestId } = req.params;
+    const userId = req.user.id;
+
+    // Verify ownership
+    const checkResult = await pool.query(
+      `SELECT ar.* FROM access_requests ar
+       JOIN qr_codes qr ON ar.qr_code_id = qr.id
+       WHERE ar.id = $1 AND qr.user_id = $2`,
+      [requestId, userId]
+    );
+
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({ message: 'Access request not found or unauthorized' });
+    }
+
+    // Update request status
+    await pool.query(
+      'UPDATE access_requests SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+      ['denied', requestId]
+    );
+
+    res.json({ success: true, message: 'Access request denied successfully' });
+  } catch (error) {
+    console.error('Access request denial error:', error);
+    res.status(500).json({ message: 'Server error while denying access request' });
+  }
+});
+
+// Get user notifications
+app.get('/api/notifications', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const notificationsResult = await pool.query(
+      `SELECT * FROM notifications 
+       WHERE user_id = $1 
+       ORDER BY created_at DESC 
+       LIMIT 50`,
+      [userId]
+    );
+
+    res.json(notificationsResult.rows);
+  } catch (error) {
+    console.error('Error fetching notifications:', error);
+    res.status(500).json({ message: 'Error fetching notifications' });
+  }
+});
+
+// Mark notification as read
+app.patch('/api/notifications/:notificationId/read', authenticateToken, async (req, res) => {
+  try {
+    const { notificationId } = req.params;
+    const userId = req.user.id;
+
+    const result = await pool.query(
+      `UPDATE notifications 
+       SET read = true 
+       WHERE id = $1 AND user_id = $2 
+       RETURNING *`,
+      [notificationId, userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'Notification not found' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error marking notification as read:', error);
+    res.status(500).json({ message: 'Error marking notification as read' });
+  }
+});
+
+// Mark all notifications as read
+app.patch('/api/notifications/read-all', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    await pool.query(
+      `UPDATE notifications 
+       SET read = true 
+       WHERE user_id = $1 AND read = false`,
+      [userId]
+    );
+
+    res.json({ message: 'All notifications marked as read' });
+  } catch (error) {
+    console.error('Error marking all notifications as read:', error);
+    res.status(500).json({ message: 'Error marking all notifications as read' });
+  }
+});
+
+// Create access request
+app.post('/api/access-requests', authenticateToken, async (req, res) => {
+  try {
+    const { documentId, message } = req.body;
+    const userId = req.user.id;
+
+    // Get document owner
+    const documentResult = await pool.query(
+      'SELECT owner_id, title FROM documents WHERE id = $1',
+      [documentId]
+    );
+
+    if (documentResult.rows.length === 0) {
+      return res.status(404).json({ message: 'Document not found' });
+    }
+
+    const document = documentResult.rows[0];
+
+    // Create access request
+    const requestResult = await pool.query(
+      `INSERT INTO access_requests (document_id, requester_id, owner_id, message) 
+       VALUES ($1, $2, $3, $4) 
+       RETURNING *`,
+      [documentId, userId, document.owner_id, message]
+    );
+
+    const request = requestResult.rows[0];
+
+    // Get owner's email
+    const ownerResult = await pool.query(
+      'SELECT email FROM users WHERE id = $1',
+      [document.owner_id]
+    );
+
+    if (ownerResult.rows.length > 0) {
+      const ownerEmail = ownerResult.rows[0].email;
+      const message = `You have received a new access request for "${document.title}".`;
+      
+      // Send email notification
+      await sendEmail(
+        ownerEmail,
+        'New Access Request',
+        message,
+        request.id
+      );
+
+      // Create notification in database
+      await pool.query(
+        `INSERT INTO notifications (user_id, type, message, data) 
+         VALUES ($1, $2, $3, $4)`,
+        [document.owner_id, 'access_request', message, { requestId: request.id }]
+      );
+    }
+
+    res.status(201).json(request);
+  } catch (error) {
+    console.error('Error creating access request:', error);
+    res.status(500).json({ message: 'Error creating access request' });
+  }
+});
+
+// Document access analytics endpoint
+app.get('/api/analytics/document-access', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { startDate, endDate } = req.query;
+    
+    // Create a safe format for the date values
+    const formattedStartDate = startDate ? `'${startDate}'::timestamp` : null;
+    const formattedEndDate = endDate ? `'${endDate}'::timestamp` : null;
+    
+    // Build date filter clause
+    let dateFilter = '';
+    if (formattedStartDate && formattedEndDate) {
+      dateFilter = ` AND ar.updated_at BETWEEN ${formattedStartDate} AND ${formattedEndDate}`;
+    } else if (formattedStartDate) {
+      dateFilter = ` AND ar.updated_at >= ${formattedStartDate}`;
+    } else if (formattedEndDate) {
+      dateFilter = ` AND ar.updated_at <= ${formattedEndDate}`;
+    }
+
+    // Get document access records with document and requester details
+    const accessRecordsSQL = `
+      SELECT DISTINCT
+        d.name as document_name,
+        d.type as document_type,
+        ar.requester_name,
+        ar.requester_mobile,
+        ar.permission_level,
+        ar.updated_at as granted_at
+      FROM access_requests ar
+      JOIN qr_codes qr ON ar.qr_code_id = qr.id
+      JOIN requested_documents rd ON ar.id = rd.access_request_id
+      JOIN documents d ON rd.document_id = d.id
+      WHERE qr.user_id = $1 
+      AND ar.status = 'approved'
+      ${dateFilter}
+      ORDER BY ar.updated_at DESC
+    `;
+    
+    const result = await pool.query(accessRecordsSQL, [userId]);
+    
+    // Transform the data to match the frontend interface
+    const accessRecords = result.rows.map(row => ({
+      documentName: row.document_name,
+      documentType: row.document_type,
+      requesterName: row.requester_name,
+      requesterMobile: row.requester_mobile,
+      permissionLevel: row.permission_level || 'view_and_download',
+      grantedAt: row.granted_at
+    }));
+
+    res.json(accessRecords);
+  } catch (error) {
+    console.error('Error fetching document access records:', error);
+    res.status(500).json({ message: 'Error fetching document access records' });
+  }
+});
+
+// Document access export endpoint
+app.get('/api/analytics/document-access/export', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { format: exportFormat = 'csv', startDate, endDate, selectedDocuments, permissionLevel } = req.query;
+    
+    // Create a safe format for the date values
+    const formattedStartDate = startDate ? `'${startDate}'::timestamp` : null;
+    const formattedEndDate = endDate ? `'${endDate}'::timestamp` : null;
+    
+    // Build date filter clause
+    let dateFilter = '';
+    if (formattedStartDate && formattedEndDate) {
+      dateFilter = ` AND ar.updated_at BETWEEN ${formattedStartDate} AND ${formattedEndDate}`;
+    } else if (formattedStartDate) {
+      dateFilter = ` AND ar.updated_at >= ${formattedStartDate}`;
+    } else if (formattedEndDate) {
+      dateFilter = ` AND ar.updated_at <= ${formattedEndDate}`;
+    }
+
+    // Build document filter clause
+    let documentFilter = '';
+    if (selectedDocuments) {
+      const documentNames = selectedDocuments.split(',');
+      const documentPlaceholders = documentNames.map((_, idx) => `$${idx + 2}`).join(',');
+      documentFilter = ` AND d.name IN (${documentPlaceholders})`;
+    }
+
+    // Build permission filter clause
+    let permissionFilter = '';
+    if (permissionLevel && permissionLevel !== 'all') {
+      permissionFilter = ` AND ar.permission_level = '${permissionLevel}'`;
+    }
+
+    // Use the same query as the regular document access endpoint with filters
+    const query = `
+      SELECT DISTINCT
+        d.name as document_name,
+        d.type as document_type,
+        ar.requester_name,
+        ar.requester_mobile,
+        ar.permission_level,
+        ar.status,
+        ar.updated_at as granted_at,
+        ar.created_at as requested_at
+      FROM access_requests ar
+      JOIN qr_codes qr ON ar.qr_code_id = qr.id
+      JOIN requested_documents rd ON ar.id = rd.access_request_id
+      JOIN documents d ON rd.document_id = d.id
+      WHERE qr.user_id = $1
+      AND ar.status = 'approved'
+      ${dateFilter}
+      ${documentFilter}
+      ${permissionFilter}
+      ORDER BY ar.updated_at DESC
+    `;
+
+    // Build query parameters array
+    const queryParams = [userId];
+    if (selectedDocuments) {
+      queryParams.push(...selectedDocuments.split(','));
+    }
+
+    const result = await pool.query(query, queryParams);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'No data to export' });
+    }
+
+    // Transform data for export
+    const exportData = result.rows.map(row => ({
+      "Document Name": row.document_name,
+      "Document Type": row.document_type.includes('application/') 
+        ? row.document_type.split('/')[1].toUpperCase()
+        : row.document_type,
+      "Requester Name": row.requester_name,
+      "Contact": row.requester_mobile,
+      "Permission Level": row.permission_level === 'view_only' ? 'View Only' : 'View & Download',
+      "Status": row.status.charAt(0).toUpperCase() + row.status.slice(1),
+      "Granted Date": row.granted_at ? new Date(row.granted_at).toLocaleDateString('en-GB', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      }) : '',
+      "Request Date": new Date(row.requested_at).toLocaleDateString('en-GB', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      })
+    }));
+
+    // Generate filename with current date/time
+    const now = new Date();
+    const filename = `document_access_report_${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}-${String(now.getMinutes()).padStart(2, '0')}`;
+
+    if (exportFormat === 'csv' || exportFormat === 'excel') {
+      const headers = Object.keys(exportData[0]).join(',');
+      const rows = exportData.map(row => 
+        Object.values(row).map(value => {
+          if (value === null || value === undefined) return '';
+          if (typeof value === 'string' && (value.includes(',') || value.includes('"') || value.includes('\n'))) {
+            return `"${value.replace(/"/g, '""')}"`;
+          }
+          return value;
+        }).join(',')
+      ).join('\n');
+      
+      const bom = exportFormat === 'excel' ? '\ufeff' : '';
+      const content = bom + headers + '\n' + rows;
+      
+      res.setHeader('Content-Type', exportFormat === 'excel' ? 'application/vnd.ms-excel' : 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}.${exportFormat === 'excel' ? 'xls' : 'csv'}"`);
+      return res.send(content);
+    }
+    else if (exportFormat === 'pdf') {
+      res.setHeader('Content-Type', 'application/json');
+      return res.json({
+        headers: Object.keys(exportData[0]),
+        data: exportData,
+        filename: filename
+      });
+    }
+    else {
+      return res.status(400).json({ message: 'Unsupported export format' });
+    }
+  } catch (error) {
+    console.error('Error exporting document access data:', error);
+    res.status(500).json({ error: 'Failed to export data' });
   }
 });
