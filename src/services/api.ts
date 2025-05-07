@@ -7,17 +7,14 @@ const getServerIP = () => {
   if (process.env.NODE_ENV === 'development') {
     // Get the current hostname and replace it with the server's IP
     const currentHost = window.location.hostname;
-    if (currentHost === 'localhost' || currentHost === '127.0.0.1') {
-      return '192.168.100.28'; // Your server's IP
-    }
     return currentHost;
   }
   // In production, use the environment variable or fallback to current host
-  return process.env.REACT_APP_SERVER_IP || window.location.hostname;
+  return process.env.VITE_API_URL || window.location.hostname;
 };
 
 const SERVER_IP = getServerIP();
-const API_URL = `http://${SERVER_IP}:8000/api`;
+export const API_URL = `http://${SERVER_IP}:8000/api`;
 console.log('API URL configured as:', API_URL);
 
 // Function to check if token is expired
@@ -88,6 +85,16 @@ api.interceptors.request.use(
   async (config) => {
     const token = localStorage.getItem('token');
     const ownerToken = localStorage.getItem('ownerToken');
+    
+    // Special case: Don't add authentication for owner verification endpoint
+    if (config.url?.includes('/access/verify')) {
+      console.log('Skipping auth for owner verification');
+      // Remove Authorization header if it exists
+      if (config.headers.Authorization) {
+        delete config.headers.Authorization;
+      }
+      return config;
+    }
     
     // Check if token is expired
     if (token && isTokenExpired(token)) {

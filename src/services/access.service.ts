@@ -55,7 +55,7 @@ class AccessService {
     return response.data;
   }
 
-  async getDocumentAccess(requestId: string): Promise<{ documents: any[] }> {
+  async getDocumentAccess(requestId: string): Promise<{ documents: any[], permissionLevel?: string }> {
     const response = await api.get(`/access/requests/${requestId}/documents`);
     return response.data;
   }

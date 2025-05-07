@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { Download, FileText, Image, ZoomIn, ZoomOut, X } from 'lucide-react';
+import { Download, FileText, Image, ZoomIn, ZoomOut, X, Eye } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import documentService from '@/services/document.service';
 import { toast } from 'sonner';
@@ -32,6 +32,7 @@ const DocumentViewer = ({
   const [error, setError] = useState<string | null>(null);
   const [documentUrl, setDocumentUrl] = useState<string | null>(null);
   const [zoom, setZoom] = useState(100);
+  const [permissionLevel, setPermissionLevel] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchDocument = async () => {
@@ -42,11 +43,12 @@ const DocumentViewer = ({
 
         setIsLoading(true);
         setError(null);
-        const { blob, contentType } = await documentService.getDocumentForViewing(documentId);
+        const { blob, contentType, permissionLevel } = await documentService.getDocumentForViewing(documentId);
         
         // Create object URL for the document
         const url = URL.createObjectURL(blob);
         setDocumentUrl(url);
+        setPermissionLevel(permissionLevel);
       } catch (err: any) {
         console.error('Error loading document:', err);
         setError(err.message || 'Failed to load document');
@@ -76,6 +78,8 @@ const DocumentViewer = ({
     setZoom(prev => Math.max(prev - 25, 50));
   };
 
+  const isViewOnly = permissionLevel === 'view_only';
+
   const renderDocumentPreview = () => {
     if (isLoading) {
       return (
@@ -92,10 +96,12 @@ const DocumentViewer = ({
             <FileText className="w-16 h-16 mx-auto text-red-500 mb-4" />
             <h3 className="text-xl font-medium mb-2">Error Loading Document</h3>
             <p className="text-red-600 mb-4">{error}</p>
-            <Button onClick={onDownload} variant="destructive">
-              <Download className="mr-2 h-4 w-4" />
-              Download to View
-            </Button>
+            {!isViewOnly && (
+              <Button onClick={onDownload} variant="destructive">
+                <Download className="mr-2 h-4 w-4" />
+                Download to View
+              </Button>
+            )}
           </div>
         </div>
       );
@@ -153,10 +159,17 @@ const DocumentViewer = ({
             <p className="text-muted-foreground mb-4">
               This document type cannot be previewed directly in the browser.
             </p>
-            <Button onClick={onDownload}>
-              <Download className="mr-2 h-4 w-4" />
-              Download to View
-            </Button>
+            {isViewOnly ? (
+              <Button disabled variant="outline">
+                <Eye className="mr-2 h-4 w-4" />
+                View Only Access
+              </Button>
+            ) : (
+              <Button onClick={onDownload}>
+                <Download className="mr-2 h-4 w-4" />
+                Download to View
+              </Button>
+            )}
           </div>
         </div>
       );
@@ -171,10 +184,28 @@ const DocumentViewer = ({
             <div className="flex items-center gap-2">
               <FileText className="h-5 w-5" />
               <DialogTitle className="text-lg truncate max-w-[300px]">{documentName}</DialogTitle>
+              {isViewOnly && (
+                <span className="ml-2 inline-flex items-center rounded-md bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700 ring-1 ring-inset ring-blue-600/20">
+                  <Eye className="mr-1 h-3 w-3" /> View Only
+                </span>
+              )}
             </div>
-            <Button variant="ghost" size="icon" onClick={onClose}>
-              <X className="h-4 w-4" />
-            </Button>
+            <div className="flex items-center gap-2">
+              {!isViewOnly && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={onDownload}
+                  disabled={isLoading}
+                >
+                  <Download className="mr-2 h-4 w-4" />
+                  Download
+                </Button>
+              )}
+              <Button variant="ghost" size="icon" onClick={onClose}>
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
           </div>
         </DialogHeader>
         <div className="p-4 h-[calc(90vh-4rem)] overflow-hidden">

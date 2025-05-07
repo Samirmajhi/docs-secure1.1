@@ -4,6 +4,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider } from "./context/AuthContext";
+import { NotificationProvider } from "./context/NotificationContext";
 import ProtectedRoute from "./components/auth/ProtectedRoute";
 import Index from "./pages/Index";
 import Dashboard from "./pages/Dashboard";
@@ -18,6 +19,7 @@ import ApprovedDocuments from "./pages/ApprovedDocuments";
 import AuthCallback from "./pages/AuthCallback";
 import AuthError from "./pages/AuthError";
 import Subscription from "./pages/Subscription";
+import Analytics from "./pages/Analytics";
 
 const queryClient = new QueryClient();
 
@@ -28,6 +30,7 @@ const App = () => (
       <Sonner />
       <BrowserRouter>
         <AuthProvider>
+          <NotificationProvider>
           <Routes>
             <Route path="/" element={<Index />} />
             <Route path="/auth/callback" element={<AuthCallback />} />
@@ -70,9 +73,15 @@ const App = () => (
                 <Subscription />
               </ProtectedRoute>
             } />
+              <Route path="/analytics" element={
+                <ProtectedRoute>
+                  <Analytics />
+                </ProtectedRoute>
+              } />
             {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
             <Route path="*" element={<NotFound />} />
           </Routes>
+          </NotificationProvider>
         </AuthProvider>
       </BrowserRouter>
     </TooltipProvider>

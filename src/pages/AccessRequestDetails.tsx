@@ -16,17 +16,20 @@ import {
   Info,
   FileIcon,
   Clock,
-  Phone
+  Phone,
+  Eye,
+  Download
 } from 'lucide-react';
 import { toast } from 'sonner';
 import api from '@/services/api';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useAuth } from '@/context/AuthContext';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
+import { formatFileSize } from '@/lib/utils';
 
 interface RequestedDocument {
-  id: number;
+  id: string;
   name: string;
   type: string;
   size: number;
@@ -50,8 +53,9 @@ const AccessRequestDetails = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [request, setRequest] = useState<AccessRequest | null>(null);
-  const [selectedDocs, setSelectedDocs] = useState<number[]>([]);
+  const [selectedDocs, setSelectedDocs] = useState<string[]>([]);
   const [processing, setProcessing] = useState(false);
+  const [permissionLevel, setPermissionLevel] = useState<'view_only' | 'view_and_download'>('view_and_download');
 
   useEffect(() => {
     const fetchRequestDetails = async () => {
@@ -81,7 +85,7 @@ const AccessRequestDetails = () => {
     fetchRequestDetails();
   }, [requestId]);
 
-  const handleDocumentSelect = (docId: number) => {
+  const handleDocumentSelect = (docId: string) => {
     setSelectedDocs(prev => 
       prev.includes(docId) 
         ? prev.filter(id => id !== docId) 
@@ -89,34 +93,47 @@ const AccessRequestDetails = () => {
     );
   };
 
+  const toggleAllDocuments = (selectAll: boolean) => {
+    if (selectAll && request) {
+      setSelectedDocs(request.documents.map(doc => doc.id));
+    } else {
+      setSelectedDocs([]);
+    }
+  };
+
   const handleAction = async (action: 'approve' | 'deny') => {
+    if (action === 'approve' && selectedDocs.length === 0) {
+      toast.error('Please select at least one document to approve');
+      return;
+    }
+
     try {
       setProcessing(true);
       if (action === 'approve') {
-        const response = await api.post(`/access/requests/${requestId}/approve`, {
-          selectedDocuments: selectedDocs
+        await api.post(`/access/requests/${requestId}/approve`, {
+          selectedDocuments: selectedDocs,
+          permissionLevel: permissionLevel
         });
         
-        if (response.data.removedDocuments?.length > 0 && !request?.isOwner) {
-          toast.info(
-            <div className="flex flex-col gap-1">
-              <span className="font-semibold text-green-600">Your request has been <span className="text-lg">approved</span></span>
-              <span className="text-sm text-muted-foreground">
-                The following documents were removed from your request: {response.data.removedDocuments.join(', ')}
-              </span>
-            </div>,
-            { duration: 5000 }
-          );
-        }
+        toast.success(
+          <div className="flex flex-col gap-1">
+            <span className="font-semibold text-green-600">Request approved successfully</span>
+            <span className="text-sm text-muted-foreground">
+              {permissionLevel === 'view_only' 
+                ? 'User will only be able to view documents'
+                : 'User will be able to view and download documents'}
+            </span>
+          </div>
+        );
       } else {
         await api.post(`/access/requests/${requestId}/deny`);
+        toast.success('Request denied successfully');
       }
       
       // Refresh request details
       const updatedResponse = await api.get(`/access/requests/${requestId}`);
       setRequest(updatedResponse.data);
       
-      toast.success(`Request ${action}d successfully`);
       navigate('/dashboard');
     } catch (error: any) {
       console.error('Error processing request:', error);
@@ -171,11 +188,7 @@ const AccessRequestDetails = () => {
             <CardDescription>{error || 'Request not found'}</CardDescription>
           </CardHeader>
           <CardContent>
-            {error === 'Please log in to process this request' ? (
-              <Button onClick={() => navigate('/login')} className="w-full">Log In</Button>
-            ) : (
-              <Button onClick={() => navigate('/dashboard')} className="w-full">Return to Dashboard</Button>
-            )}
+            <Button onClick={() => navigate('/dashboard')} className="w-full">Return to Dashboard</Button>
           </CardContent>
         </Card>
       </div>
@@ -243,15 +256,53 @@ const AccessRequestDetails = () => {
 
             <Separator />
 
+            {/* Permission Level Selection - Only show for pending requests */}
+            {request.status === 'pending' && request.isOwner && (
+              <div className="space-y-3">
+                <Label>Permission Level</Label>
+                <Select
+                  value={permissionLevel}
+                  onValueChange={(value: 'view_only' | 'view_and_download') => setPermissionLevel(value)}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="view_and_download">
+                      <div className="flex items-center gap-2">
+                        <Download className="h-4 w-4" />
+                        <span>View & Download</span>
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="view_only">
+                      <div className="flex items-center gap-2">
+                        <Eye className="h-4 w-4" />
+                        <span>View Only</span>
+                      </div>
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-sm text-muted-foreground">
+                  {permissionLevel === 'view_only' 
+                    ? 'User will only be able to view documents online'
+                    : 'User will be able to view and download documents'}
+                </p>
+              </div>
+            )}
+
             {/* Document List */}
             <div className="space-y-4">
               <div className="flex items-center justify-between">
-                <h3 className="text-lg font-semibold">
-                  {request.isOwner ? 'Requested Documents' : 'Approved Documents'}
-                </h3>
-                <p className="text-sm text-muted-foreground">
-                  {request.documents.length} document{request.documents.length !== 1 ? 's' : ''} selected
-                </p>
+                <h3 className="text-lg font-semibold">Requested Documents</h3>
+                {request.status === 'pending' && request.isOwner && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => toggleAllDocuments(selectedDocs.length !== request.documents.length)}
+                  >
+                    {selectedDocs.length === request.documents.length ? 'Deselect All' : 'Select All'}
+                  </Button>
+                )}
               </div>
               
               <div className="grid gap-3">
@@ -260,7 +311,7 @@ const AccessRequestDetails = () => {
                     key={doc.id} 
                     className="flex items-center p-4 bg-card rounded-xl border shadow-sm hover:shadow-md transition-shadow"
                   >
-                    {request.isOwner && request.status === 'pending' && (
+                    {request.status === 'pending' && request.isOwner && (
                       <Checkbox 
                         id={`doc-${doc.id}`}
                         checked={selectedDocs.includes(doc.id)}
@@ -275,23 +326,17 @@ const AccessRequestDetails = () => {
                         <div className="flex items-center gap-2 text-sm text-muted-foreground">
                           <span>{doc.type}</span>
                           <span>•</span>
-                          <span>{(doc.size / 1024).toFixed(1)} KB</span>
+                          <span>{formatFileSize(doc.size)}</span>
                         </div>
                       </div>
                     </div>
                   </div>
                 ))}
-                {!request.isOwner && request.status !== 'approved' && (
-                  <div className="text-center py-8 text-muted-foreground">
-                    <Info className="w-8 h-8 mx-auto mb-2" />
-                    <p>No documents available. Please wait for the owner to approve your request.</p>
-                  </div>
-                )}
               </div>
             </div>
 
             {/* Action Buttons */}
-            {request.isOwner && request.status === 'pending' && (
+            {request.status === 'pending' && request.isOwner && (
               <div className="flex items-center justify-end gap-3 pt-6">
                 <Button
                   variant="outline"
@@ -301,40 +346,42 @@ const AccessRequestDetails = () => {
                   Cancel
                 </Button>
                 
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      variant="default"
-                      disabled={processing || selectedDocs.length === 0}
-                      className="min-w-[120px]"
-                    >
-                      {processing ? (
-                        <div className="flex items-center gap-2">
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                          <span>Processing...</span>
-                        </div>
-                      ) : (
-                        <span>Take Action</span>
-                      )}
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent>
-                    <DropdownMenuItem 
-                      onClick={() => handleAction('approve')}
-                      className="flex items-center gap-2 py-2"
-                    >
-                      <CheckCircle className="w-4 h-4 text-green-500" />
-                      <span>Approve Request</span>
-                    </DropdownMenuItem>
-                    <DropdownMenuItem 
-                      onClick={() => handleAction('deny')}
-                      className="flex items-center gap-2 py-2"
-                    >
-                      <XCircle className="w-4 h-4 text-red-500" />
-                      <span>Deny Request</span>
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                <Button
+                  variant="destructive"
+                  onClick={() => handleAction('deny')}
+                  disabled={processing}
+                >
+                  {processing ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      Processing...
+                    </>
+                  ) : (
+                    <>
+                      <XCircle className="w-4 h-4 mr-2" />
+                      Deny Request
+                    </>
+                  )}
+                </Button>
+
+                <Button
+                  variant="default"
+                  onClick={() => handleAction('approve')}
+                  disabled={processing || selectedDocs.length === 0}
+                  className="bg-green-600 hover:bg-green-700"
+                >
+                  {processing ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      Processing...
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle className="w-4 h-4 mr-2" />
+                      Approve Request
+                    </>
+                  )}
+                </Button>
               </div>
             )}
           </CardContent>

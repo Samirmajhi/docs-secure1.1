@@ -165,9 +165,22 @@ const qrcodeService = {
       // Try with actual API first
       try {
         console.log('Attempting API verification first');
+        
+        // Normalize the mobile number by:
+        // 1. Removing all non-digit characters
+        // 2. Adding country code if not present
+        let normalizedMobile = mobileNumber.replace(/\D/g, '');
+        if (!normalizedMobile.startsWith('977')) {
+          normalizedMobile = '977' + normalizedMobile;
+        }
+        
         const response = await api.post('/access/verify', { 
-          mobileNumber: mobileNumber.trim(), 
+          mobileNumber: normalizedMobile, 
           pin: pin.trim() 
+        }, {
+          headers: {
+            'Authorization': '' 
+          }
         });
         
         toast.success('Owner verification successful');
@@ -176,7 +189,6 @@ const qrcodeService = {
         console.log('API verification failed, falling back to local verification', apiError);
         
         // Fall back to local verification
-        // Get the stored user data
         const storedUser = localStorage.getItem('user');
         console.log('Stored user from localStorage:', storedUser);
         
@@ -186,27 +198,25 @@ const qrcodeService = {
             storedMobile: userData.mobileNumber,
             providedMobile: mobileNumber,
             storedPin: userData.pin,
-            providedPin: pin,
-            pinLength: userData.pin?.length || 0
+            providedPin: pin
           });
           
-          // Normalize phone numbers by removing all non-digit characters for comparison
+          // Normalize both stored and provided numbers
           const normalizedStoredMobile = userData.mobileNumber?.replace(/\D/g, '') || '';
-          const normalizedProvidedMobile = mobileNumber.replace(/\D/g, '') || '';
+          let normalizedProvidedMobile = mobileNumber.replace(/\D/g, '') || '';
+          
+          // Add country code to provided mobile if not present
+          if (!normalizedProvidedMobile.startsWith('977')) {
+            normalizedProvidedMobile = '977' + normalizedProvidedMobile;
+          }
           
           console.log('Mobile number comparison:', {
             normalizedStored: normalizedStoredMobile,
             normalizedProvided: normalizedProvidedMobile
           });
           
-          // Check if the provided mobile and PIN match the stored user
-          const mobileMatches = 
-            normalizedStoredMobile && 
-            normalizedProvidedMobile && 
-            (normalizedStoredMobile === normalizedProvidedMobile ||
-             normalizedStoredMobile.endsWith(normalizedProvidedMobile) || 
-             normalizedProvidedMobile.endsWith(normalizedStoredMobile));
-          
+          // Check if the provided mobile and PIN match
+          const mobileMatches = normalizedStoredMobile === normalizedProvidedMobile;
           const pinMatches = userData.pin && pin && userData.pin.trim() === pin.trim();
           
           console.log('Verification results:', {
@@ -229,32 +239,13 @@ const qrcodeService = {
               }
             }
             
-            if (!documents || documents.length === 0) {
-              documents = [
-                {
-                  id: 1,
-                  name: 'Sample Document 1.pdf',
-                  type: 'application/pdf',
-                  size: 1024000,
-                  created_at: new Date().toISOString()
-                },
-                {
-                  id: 2,
-                  name: 'Sample Document 2.docx',
-                  type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-                  size: 512000,
-                  created_at: new Date().toISOString()
-                }
-              ];
-            }
-            
             toast.success('Owner verification successful');
             return {
               message: 'Owner verified successfully',
               documents: documents
             };
           } else {
-            console.error('Local verification failed - PIN or mobile mismatch:', {
+            console.error('Local verification failed:', {
               mobileMatches,
               pinMatches
             });
